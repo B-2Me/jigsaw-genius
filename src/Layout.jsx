@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Puzzle, Info, GitBranch, LogOut, UserCircle, ShieldCheck, Copy, Check } from "lucide-react";
+import { Puzzle, Info, GitBranch, LogOut, UserCircle, ShieldCheck, Copy, Check, Github } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -104,7 +104,7 @@ export default function Layout({ children }) {
             </SidebarContent>
 
             <SidebarFooter className="p-4 border-t border-slate-800 bg-slate-900/40 space-y-5">
-              {/* STATUS & VERSION */}
+              {/* STATUS & VERSION & GITHUB */}
               <div className="flex items-center justify-between px-2">
                 <div className="flex items-center gap-2">
                   <ShieldCheck className={`w-3.5 h-3.5 ${isAuthenticated ? 'text-emerald-500' : 'text-slate-600'}`} />
@@ -112,7 +112,19 @@ export default function Layout({ children }) {
                     {isAuthenticated ? (user?.role || 'user') : 'guest'}
                   </span>
                 </div>
-                <span className="text-[10px] font-mono text-slate-700 font-bold">v2.0.6</span>
+                
+                <div className="flex items-center gap-3">
+                  <span className="text-[10px] font-mono text-slate-700 font-bold">v2.0.6</span>
+                  <a 
+                    href="https://github.com/B-2Me/jigsaw-genius" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-slate-600 hover:text-white transition-colors"
+                    title="View Source on GitHub"
+                  >
+                    <Github className="w-3.5 h-3.5" />
+                  </a>
+                </div>
               </div>
 
               {isAuthenticated ? (
@@ -174,7 +186,11 @@ export default function Layout({ children }) {
 
 function SidebarTriggerWithLogic() {
   const { open, isMobile } = useSidebar();
-  if (open || isMobile) return null;
+  
+  // LOGIC FIX:
+  // Only hide the button if we are on Desktop AND the sidebar is fully open.
+  // If we are on Mobile, we ALWAYS show the button (so you can open the sheet).
+  if (open && !isMobile) return null;
 
   return (
     <div className="fixed top-4 left-4 z-50">
