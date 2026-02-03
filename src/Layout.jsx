@@ -54,42 +54,65 @@ export default function Layout({ children }) {
                 </div>
                 <div>
                   <h2 className="font-bold text-xl text-white">Eternity II</h2>
-                  <p className="text-xs text-slate-400">Solver & Analyzer</p>
+                  <p className="text-xs text-slate-400 font-medium">Solver & Analyzer</p>
                 </div>
               </div>
               <SidebarTrigger className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity text-slate-600 hover:text-slate-300" />
             </SidebarHeader>
             
-            <SidebarContent className="p-4">
-              <SidebarGroup>
-                <SidebarGroupLabel className="text-xs font-medium text-slate-400 uppercase tracking-wider px-3 py-2">
-                  Algorithm Info
+            <SidebarContent className="p-6">
+              <SidebarGroup className="p-0">
+                <SidebarGroupLabel className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-6 px-0">
+                  ALGORITHM INFO
                 </SidebarGroupLabel>
                 <SidebarGroupContent>
-                  <div className="px-3 py-4 space-y-4">
-                    <div className="flex items-start gap-3 text-sm leading-tight">
-                        <Info className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
-                        <span className="text-slate-300 italic">Strict placement order & random rotation matching.</span>
+                  <div className="space-y-8">
+                    {/* Primary Logic Bullets */}
+                    <div className="space-y-5">
+                      <div className="flex items-start gap-3">
+                        <Info className="w-5 h-5 text-slate-500 flex-shrink-0 mt-0.5" />
+                        <span className="text-[14px] text-slate-300 leading-relaxed font-light">
+                          Strict placement order & <br/>random rotation matching.
+                        </span>
+                      </div>
+                      <div className="flex items-start gap-3">
+                        <GitBranch className="w-5 h-5 text-slate-500 flex-shrink-0 mt-0.5" />
+                        <span className="text-[14px] text-slate-300 leading-relaxed font-light">
+                          Non-backtracking,<br/> brute-force statistical analysis.
+                        </span>
+                      </div>
                     </div>
-                     <div className="flex items-start gap-3 text-sm leading-tight">
-                        <GitBranch className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
-                        <span className="text-slate-300 italic">Non-backtracking, brute-force statistical analysis.</span>
+
+                    {/* Metadata Section - Compact & Left Aligned */}
+                    <div className="space-y-3 pt-6 border-t border-slate-800/50">
+                      <div className="flex items-center gap-4">
+                        <span className="text-sm text-slate-400 min-w-[80px]">Board Size:</span>
+                        <span className="text-sm text-white font-bold tracking-wide">16×16</span>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <span className="text-sm text-slate-400 min-w-[80px]">Total Pieces:</span>
+                        <span className="text-sm text-white font-bold tracking-wide">256</span>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <span className="text-sm text-slate-400 min-w-[80px]">Hint Pieces:</span>
+                        <span className="text-sm text-white font-bold tracking-wide">5</span>
+                      </div>
                     </div>
                   </div>
                 </SidebarGroupContent>
               </SidebarGroup>
             </SidebarContent>
 
-            <SidebarFooter className="p-4 border-t border-slate-800 bg-slate-900/40 space-y-4">
+            <SidebarFooter className="p-4 border-t border-slate-800 bg-slate-900/40 space-y-5">
               {/* STATUS & VERSION */}
-              <div className="flex items-center justify-between px-2 pt-1">
+              <div className="flex items-center justify-between px-2">
                 <div className="flex items-center gap-2">
                   <ShieldCheck className={`w-3.5 h-3.5 ${isAuthenticated ? 'text-emerald-500' : 'text-slate-600'}`} />
                   <span className={`text-[10px] font-bold uppercase tracking-widest ${isAuthenticated ? 'text-emerald-400' : 'text-slate-500'}`}>
                     {isAuthenticated ? (user?.role || 'user') : 'guest'}
                   </span>
                 </div>
-                <span className="text-[9px] font-mono text-slate-700 font-bold">v2.0.6</span>
+                <span className="text-[10px] font-mono text-slate-700 font-bold">v2.0.6</span>
               </div>
 
               {isAuthenticated ? (
@@ -97,7 +120,7 @@ export default function Layout({ children }) {
                   <div className="flex items-center gap-3 px-2">
                     <UserCircle className="w-5 h-5 text-indigo-400 flex-shrink-0" />
                     <div className="flex flex-col overflow-hidden">
-                      <span className="text-sm font-semibold text-slate-200 truncate leading-none mb-1">
+                      <span className="text-sm font-semibold text-slate-200 truncate leading-none mb-1.5" title={user.email}>
                         {user.email}
                       </span>
                       <div className="flex items-center gap-2">
@@ -127,10 +150,10 @@ export default function Layout({ children }) {
               ) : (
                 <div className="space-y-3 px-1">
                   <p className="text-[11px] text-slate-500 italic text-center leading-relaxed">
-                    Sign in to sync your solver progress.
+                    Sign in to sync progress.
                   </p>
                   <Button 
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shadow-lg"
+                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-5 shadow-lg shadow-indigo-900/20"
                     onClick={() => setIsAuthModalOpen(true)}
                   >
                     Login / Register
