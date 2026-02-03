@@ -1,8 +1,8 @@
 import React, { createContext, useState, useEffect, useCallback, useContext, useRef } from 'react';
 import { base44 } from '@/api/base44Client';
-import { supabase } from '@/lib/supabase-client'; //
+import { supabase } from '@/lib/supabase-client';
 
-// --- Data (final version from user's code) ---
+// --- Data Constants ---
 const pieces = [
     {"id": 0, "edges": [0, 0, 1, 17]}, {"id": 1, "edges": [0, 0, 1, 5]}, {"id": 2, "edges": [0, 0, 9, 17]},
     {"id": 3, "edges": [0, 0, 17, 9]}, {"id": 4, "edges": [0, 1, 2, 1]}, {"id": 5, "edges": [0, 1, 10, 9]},
@@ -141,7 +141,7 @@ export const useSolver = () => useContext(SolverContext);
 export const SolverProvider = ({ children }) => {
   const [board, setBoard] = useState(Array(SIZE * SIZE).fill(null));
   const [isRunning, setIsRunning] = useState(false);
-  const [onlineCount, setOnlineCount] = useState(0); // STATE for online count
+  const [onlineCount, setOnlineCount] = useState(0); 
   
   const [currentRun, setCurrentRun] = useState(() => getInitialState('solver-currentRun', { run: 0, score: 0 }));
   const [stats, setStats] = useState(() => getInitialState('solver-stats', {
@@ -157,28 +157,21 @@ export const SolverProvider = ({ children }) => {
   }));
 
   const pendingGlobalRunsRef = useRef(0);
+  const globalStatsIdRef = useRef(null);
 
-  // --- NEW: Real-time Presence Logic ---
+  // --- 1. Real-time Presence Logic (Fixes "0 Online") ---
   useEffect(() => {
-    // 1. Create a channel for 'online-users'
-    const channel = supabase.channel('online-users', {
-      config: {
-        presence: {
-          key: 'user', 
-        },
-      },
-    });
+    // Join without custom key so Supabase assigns unique UUID per user
+    const channel = supabase.channel('online-users');
 
-    // 2. Subscribe to sync events
     channel
       .on('presence', { event: 'sync' }, () => {
         const newState = channel.presenceState();
-        // The count is simply the number of unique presence keys
+        // Count unique keys in the presence state
         setOnlineCount(Object.keys(newState).length);
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
-          // 3. Track ourselves once connected
           await channel.track({ online_at: new Date().toISOString() });
         }
       });
@@ -187,8 +180,8 @@ export const SolverProvider = ({ children }) => {
       supabase.removeChannel(channel);
     };
   }, []);
-  // ------------------------------------
 
+  // --- 2. Persist Local State ---
   useEffect(() => {
     localStorage.setItem('solver-currentRun', JSON.stringify(currentRun));
     localStorage.setItem('solver-stats', JSON.stringify(stats));
@@ -198,27 +191,34 @@ export const SolverProvider = ({ children }) => {
     localStorage.setItem('solver-mlParams', JSON.stringify(mlParams));
   }, [currentRun, stats, hintAdjacencyStats, globalScoreDistribution, placementAttemptCounts, mlParams]);
 
+  // --- 3. Dynamic Global Stats Sync (Fixes "Total Global Runs") ---
   useEffect(() => {
+    // A. Fetch the correct Row ID once on mount
+    const fetchStatId = async () => {
+      const { data } = await supabase
+        .from('global_stats')
+        .select('id')
+        .eq('stat_name', 'total_global_runs')
+        .single();
+      if (data) {
+        globalStatsIdRef.current = data.id;
+      }
+    };
+    fetchStatId();
+  }, []);
+
+  useEffect(() => {
+    // B. Sync interval using the fetched ID
     const interval = setInterval(async () => {
-      if (pendingGlobalRunsRef.current > 0) {
+      if (pendingGlobalRunsRef.current > 0 && globalStatsIdRef.current) {
         const runsToAdd = pendingGlobalRunsRef.current;
         pendingGlobalRunsRef.current = 0;
         
         try {
-          const globalStats = await base44.entities.GlobalStats.list();
-          const globalRunsStat = globalStats.find(stat => stat.stat_name === 'total_global_runs');
-          
-          if (globalRunsStat) {
-            await base44.entities.GlobalStats.update(globalRunsStat.id, {
-              stat_name: 'total_global_runs',
-              stat_value: (globalRunsStat.stat_value || 0) + runsToAdd
-            });
-          } else {
-            await base44.entities.GlobalStats.create({
-              stat_name: 'total_global_runs',
-              stat_value: runsToAdd
-            });
-          }
+          await supabase.rpc('increment_global_runs', { 
+            row_id: globalStatsIdRef.current, 
+            inc_value: runsToAdd 
+          });
         } catch (error) {
           console.error('Failed to update global runs:', error);
           pendingGlobalRunsRef.current += runsToAdd;

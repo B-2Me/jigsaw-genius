@@ -1,5 +1,6 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { base44 } from "@/api/base44Client";
+import { supabase } from "@/lib/supabase-client"; // Required for real-time subscription
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Info, Eye, TrendingUp } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -9,37 +10,30 @@ import { useAuth } from "@/lib/AuthContext";
 import PuzzleBoard from "../components/puzzle/PuzzleBoard";
 import SolverControls from "../components/puzzle/SolverControls";
 import HintAnalysis from "../components/puzzle/HintAnalysis";
-// DebugPanel removed as requested earlier
-// import DebugPanel from "../components/puzzle/DebugPanel";
 
 export default function SolverPage() {
   const {
     board, isRunning, currentRun, stats, hints, mlParams,
     handleStart, handlePause, handleReset,
     hintAdjacencyStats, pieces,
-    onlineCount // NEW: Get the real-time count from context
+    onlineCount // 1. From Context (Presence)
   } = useSolver();
 
-  const { user: authUser, isAuthenticated } = useAuth();
+  const { user: authUser } = useAuth();
   const queryClient = useQueryClient();
+  
+  // State for real-time Global Runs
+  const [globalRuns, setGlobalRuns] = useState(0);
 
-  // Track page view - Using singular PageView entity as expected by SDK
+  // --- 1. Total Visits Logic (Keep this!) ---
   const { data: pageViews } = useQuery({
     queryKey: ['pageViews'],
     queryFn: () => base44.entities.PageView.list(),
     initialData: [],
   });
 
-  // Get global runs count - Using plural GlobalStats entity as expected by SDK
-  const { data: globalStats } = useQuery({
-    queryKey: ['globalStats'],
-    queryFn: () => base44.entities.GlobalStats.list(),
-    initialData: [],
-  });
-
   const recordVisitMutation = useMutation({
     mutationFn: async () => {
-      // Use the pre-existing authUser from context instead of re-calling the API 
       return base44.entities.PageView.create({
         page_name: "Solver",
         visitor_email: authUser?.email || "anonymous"
@@ -51,16 +45,46 @@ export default function SolverPage() {
   });
 
   useEffect(() => {
-    // Only record the visit once auth state is determined
+    // Record visit on mount
     recordVisitMutation.mutate();
   }, []);
+  // ------------------------------------------
 
-  // Note: We've removed the manual 'onlineVisitors' calculation (diffMinutes <= 5)
-  // in favor of the real-time 'onlineCount' from SolverContext.
 
-  // Get total global runs
-  const globalRunsStat = globalStats.find(stat => stat.stat_name === 'total_global_runs');
-  const totalGlobalRuns = globalRunsStat?.stat_value || 0;
+  // --- 2. Global Runs Real-time Logic (New) ---
+  useEffect(() => {
+    // A. Fetch initial value once
+    const fetchInitialGlobalRuns = async () => {
+      const { data, error } = await supabase
+        .from('global_stats')
+        .select('stat_value')
+        .eq('stat_name', 'total_global_runs')
+        .single();
+      
+      if (data && !error) {
+        setGlobalRuns(data.stat_value);
+      }
+    };
+    fetchInitialGlobalRuns();
+
+    // B. Subscribe to live changes
+    const subscription = supabase
+      .channel('global-stats-live')
+      .on('postgres_changes', 
+        { event: 'UPDATE', schema: 'public', table: 'global_stats' }, 
+        (payload) => {
+          if (payload.new.stat_name === 'total_global_runs') {
+            setGlobalRuns(payload.new.stat_value);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(subscription);
+    };
+  }, []);
+  // --------------------------------------------
 
   const alertDescription = mlParams.useCalibration
     ? `Data collection mode is active. The solver uses uniform random selection to gather comprehensive statistics. When disabled, the solver will use rarity-weighted ML to prioritize pieces based on their historical performance.`
@@ -80,6 +104,7 @@ export default function SolverPage() {
 
         {/* Stats Display */}
         <div className="flex justify-center gap-6 flex-wrap">
+          {/* Total Visits Card */}
           <div className="bg-slate-950/50 rounded-lg px-6 py-3 border border-slate-800 backdrop-blur-sm">
             <div className="flex items-center gap-3 h-full">
               <Eye className="w-4 h-4 text-slate-400" />
@@ -96,16 +121,19 @@ export default function SolverPage() {
             </div>
           </div>
 
+          {/* Global Runs Card (Real-time) */}
           <div className="bg-slate-950/50 rounded-lg px-6 py-3 border border-slate-800 backdrop-blur-sm">
             <div className="flex flex-col items-center justify-center h-full">
               <div className="flex items-center gap-3">
                 <TrendingUp className="w-4 h-4 text-slate-400" />
                 <span className="text-sm text-slate-400 leading-none">Total Global Runs:</span>
                 <span className="text-lg font-bold text-white leading-none">
-                  {totalGlobalRuns.toLocaleString()}
+                  {globalRuns.toLocaleString()}
                 </span>
               </div>
-              <span className="text-xs text-slate-500 mt-1">updates every 10 seconds</span>
+              <span className="text-[10px] text-slate-500 mt-1 uppercase tracking-wider">
+                Live Updates
+              </span>
             </div>
           </div>
         </div>
