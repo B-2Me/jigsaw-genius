@@ -1,9 +1,19 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Button } from "@/components/ui/button";
-import { Play, Pause, RotateCcw, Download, Upload, Globe } from "lucide-react";
+import { Play, Pause, RotateCcw, Download, Upload, Globe, AlertTriangle } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useSolver } from './SolverContext';
 import { useAuth } from '@/lib/AuthContext';
 import { base44 } from '@/api/base44Client';
@@ -20,16 +30,18 @@ export default function SolverControls({
   const fileInputRef = useRef(null);
   const [isOwner, setIsOwner] = useState(false);
   
+  // Local UI state
   const [localIterations, setLocalIterations] = useState(mlParams.iterationsPerSecond || 10000); 
   const [localUpdateFreq, setLocalUpdateFreq] = useState(mlParams.boardUpdateFrequency || 100);
 
+  // Merge Mode Safety State
+  const [mergeMode, setMergeMode] = useState(false);
+  const [showMergeWarning, setShowMergeWarning] = useState(false);
+
   useEffect(() => {
-    // Check ownership by querying the database role via SDK
     const checkAccess = async () => {
       if (authUser) {
         try {
-          //const profile = await base44.auth.me();
-          //setIsOwner(profile?.role === 'admin');
           setIsOwner(true);
         } catch (err) {
           console.error("Failed to auth:", err);
@@ -39,11 +51,27 @@ export default function SolverControls({
         setIsOwner(false);
       }
     };
-    
     checkAccess();
   }, [authUser]);
 
+  // Handle the Merge Toggle Safety Check
+  const handleMergeToggle = (checked) => {
+    if (checked) {
+      // If turning ON, show warning first
+      setShowMergeWarning(true);
+    } else {
+      // If turning OFF, just do it
+      setMergeMode(false);
+    }
+  };
+
+  const confirmMergeEnable = () => {
+    setMergeMode(true);
+    setShowMergeWarning(false);
+  };
+
   const handleDownload = () => {
+    // [Existing Export Logic - Unchanged]
     const allScoresSet = new Set();
     Object.keys(hintAdjacencyStats).forEach(key => {
         const pieceData = hintAdjacencyStats[key];
@@ -148,6 +176,7 @@ export default function SolverControls({
   };
 
   const handleGlobalStatsDownload = () => {
+    // [Existing Export Logic - Unchanged]
     const csvRows = [];
     csvRows.push(['Global Statistics Export', '', '', '', '', '', '', '', '']);
     csvRows.push(['']);
@@ -191,18 +220,36 @@ export default function SolverControls({
         try {
           const csvContent = e.target.result;
           const lines = csvContent.split('\n');
-          const newHintAdjacencyStats = {};
-          const newGlobalScoreDistribution = {};
           
-          let newStats = { totalRuns: 0, bestScore: 0, avgScore: 0, completedSolutions: 0 };
-          let newCurrentRun = { run: 0, score: 0 };
-          let newMlParams = { useCalibration: true, boardUpdateFrequency: 10, iterationsPerSecond: 100 };
+          // [Logic Switch] REPLACE vs MERGE
+          // If Merge: Start with deep copy of current state. 
+          // If Replace: Start with empty objects/zeros.
+          const newHintAdjacencyStats = mergeMode 
+            ? JSON.parse(JSON.stringify(hintAdjacencyStats)) 
+            : {};
+          const newGlobalScoreDistribution = mergeMode 
+            ? { ...globalScoreDistribution } 
+            : {};
+          
+          let newStats = mergeMode 
+            ? { ...stats } 
+            : { totalRuns: 0, bestScore: 0, avgScore: 0, completedSolutions: 0 };
+            
+          let newCurrentRun = { run: 0, score: 0 }; // Always reset current run on import
+          
+          let newMlParams = { 
+            useCalibration: true, 
+            boardUpdateFrequency: 10, 
+            iterationsPerSecond: 100 
+          };
           
           let isMetadata = false;
           let isGlobalScoreDist = false;
           let scoreColumns = [];
 
           let mainDataHeaderFound = false;
+          
+          // Pre-scan for headers
           for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
             if (!line) continue;
@@ -225,6 +272,7 @@ export default function SolverControls({
               throw new Error("CSV header for main data not found.");
           }
 
+          // Main Parse Loop
           for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
             if (!line) continue;
@@ -253,28 +301,48 @@ export default function SolverControls({
               if (cells[0] === 'Score') continue;
               const [score, count] = cells;
               if (score && count) {
-                newGlobalScoreDistribution[score] = parseInt(count) || 0;
+                const countVal = parseInt(count) || 0;
+                if (mergeMode) {
+                  newGlobalScoreDistribution[score] = (newGlobalScoreDistribution[score] || 0) + countVal;
+                } else {
+                  newGlobalScoreDistribution[score] = countVal;
+                }
               }
             } else if (isMetadata) {
               const [key, value] = cells;
               switch (key) {
                 case 'TotalRuns':
-                  newStats.totalRuns = parseInt(value) || 0;
+                  if (mergeMode) newStats.totalRuns += (parseInt(value) || 0);
+                  else newStats.totalRuns = parseInt(value) || 0;
                   break;
                 case 'BestScore':
-                  newStats.bestScore = parseInt(value) || 0;
+                  if (mergeMode) newStats.bestScore = Math.max(newStats.bestScore, parseInt(value) || 0);
+                  else newStats.bestScore = parseInt(value) || 0;
                   break;
                 case 'AvgScore':
-                  newStats.avgScore = parseFloat(value) || 0;
+                  const importedAvg = parseFloat(value) || 0;
+                  if (mergeMode) {
+                     // Approximate weighted average merge (using TotalRuns as weight)
+                     // Note: This is an approximation if we don't have exact run counts for the current session vs imported
+                     const currentTotal = stats.totalRuns || 1;
+                     const importedTotal = (parseInt(lines.find(l => l.startsWith('TotalRuns'))?.split(',')[1]) || 1);
+                     const combinedAvg = ((stats.avgScore * currentTotal) + (importedAvg * importedTotal)) / (currentTotal + importedTotal);
+                     newStats.avgScore = combinedAvg || 0;
+                  } else {
+                     newStats.avgScore = importedAvg;
+                  }
                   break;
                 case 'CompletedSolutions':
-                  newStats.completedSolutions = parseInt(value) || 0;
+                  if (mergeMode) newStats.completedSolutions += (parseInt(value) || 0);
+                  else newStats.completedSolutions = parseInt(value) || 0;
                   break;
                 case 'CurrentRunNumber':
-                  newCurrentRun.run = parseInt(value) || 0;
+                  // Always adopt the imported run number or keep 0? Usually just info.
+                  // For merge, we don't really change current run number.
+                  if (!mergeMode) newCurrentRun.run = parseInt(value) || 0;
                   break;
                 case 'CurrentRunScore':
-                  newCurrentRun.score = parseInt(value) || 0;
+                   if (!mergeMode) newCurrentRun.score = parseInt(value) || 0;
                   break;
                 case 'UseCalibration':
                   newMlParams.useCalibration = value === 'true';
@@ -287,11 +355,18 @@ export default function SolverControls({
                   break;
               }
             } else {
+              // --- HINT ADJACENCY STATS ---
               if (cells[0] === 'HintPosition') continue;
               
-              const [hintPos, direction, pieceId, rotation, weightedAvgContribution, count, selectionPercentage, pieceColorsString, ...scoreDistCountsAndTotal] = cells;
+              const [hintPos, direction, pieceIdStr, rotationStr, weightedAvgStr, countStr, , , ...scoreDistCountsAndTotal] = cells;
               
-              if (hintPos && direction && pieceId && rotation) {
+              const pieceId = parseInt(pieceIdStr);
+              const rotation = parseInt(rotationStr);
+              
+              if (isNaN(pieceId) || isNaN(rotation)) continue;
+              if (![0, 90, 180, 270].includes(rotation)) continue;
+
+              if (hintPos && direction) {
                 const key = `${hintPos}-${direction}`;
                 if (!newHintAdjacencyStats[key]) newHintAdjacencyStats[key] = {};
                 if (!newHintAdjacencyStats[key][pieceId]) newHintAdjacencyStats[key][pieceId] = {};
@@ -305,15 +380,33 @@ export default function SolverControls({
                   }
                 }
 
-                const parsedCount = parseInt(count) || 0;
-                const parsedWeightedAvg = parseFloat(weightedAvgContribution) || 0;
+                const parsedCount = parseInt(countStr) || 0;
+                const parsedWeightedAvg = parseFloat(weightedAvgStr) || 0;
 
-                newHintAdjacencyStats[key][pieceId][rotation] = {
-                  weighted_sum_of_scores: parsedWeightedAvg * parsedCount,
-                  weighted_avg_contribution: parsedWeightedAvg,
-                  count: parsedCount,
-                  scoreDistribution: scoreDistribution
-                };
+                // MERGE / REPLACE LOGIC for specific piece stats
+                const existingEntry = newHintAdjacencyStats[key][pieceId][rotation];
+                
+                if (existingEntry) {
+                    // Valid for both Merge Mode (combining CSV with State) 
+                    // AND Replace Mode (combining duplicate rows within CSV)
+                    const totalWeightedSum = (existingEntry.weighted_avg_contribution * existingEntry.count) + (parsedWeightedAvg * parsedCount);
+                    const totalCount = existingEntry.count + parsedCount;
+                    
+                    Object.entries(scoreDistribution).forEach(([score, count]) => {
+                        existingEntry.scoreDistribution[score] = (existingEntry.scoreDistribution[score] || 0) + count;
+                    });
+
+                    existingEntry.weighted_sum_of_scores = totalWeightedSum;
+                    existingEntry.weighted_avg_contribution = totalCount > 0 ? totalWeightedSum / totalCount : 0;
+                    existingEntry.count = totalCount;
+                } else {
+                    newHintAdjacencyStats[key][pieceId][rotation] = {
+                        weighted_sum_of_scores: parsedWeightedAvg * parsedCount,
+                        weighted_avg_contribution: parsedWeightedAvg,
+                        count: parsedCount,
+                        scoreDistribution: scoreDistribution
+                    };
+                }
               }
             }
           }
@@ -330,8 +423,10 @@ export default function SolverControls({
           });
           setLocalIterations(newMlParams.iterationsPerSecond);
           setLocalUpdateFreq(newMlParams.boardUpdateFrequency);
+          
+          const modeMsg = mergeMode ? "MERGED" : "REPLACED";
+          alert(`Success: CSV data has been ${modeMsg} into the solver.`);
 
-          alert("CSV backup data loaded successfully!");
         } catch (error) {
           console.error("Failed to parse CSV file:", error);
           alert(`Error: Could not load the data. ${error.message}`);
@@ -371,193 +466,244 @@ export default function SolverControls({
   };
 
   return (
-    <div className="bg-slate-950/50 rounded-2xl p-6 backdrop-blur-sm border border-slate-800">
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
-        <div>
-          <h3 className="text-xl font-bold text-white mb-2">Solver Controls</h3>
-          <p className="text-slate-300 text-sm max-w-md">
-            Start the simulation or import a previous run.
-          </p>
-        </div>
-        
-        <div className="flex flex-wrap items-center gap-3">
-          <Button
-            onClick={isRunning ? onPause : onStart}
-            className={`w-28 ${
-              isRunning 
-                ? 'bg-orange-600 hover:bg-orange-700' 
-                : 'bg-green-600 hover:bg-green-700'
-            } text-white`}
-          >
-            {isRunning ? (
-              <>
-                <Pause className="w-4 h-4 mr-2" />
-                Pause
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4 mr-2" />
-                Start
-              </>
-            )}
-          </Button>
+    <>
+      <div className="bg-slate-950/50 rounded-2xl p-6 backdrop-blur-sm border border-slate-800">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+          <div>
+            <h3 className="text-xl font-bold text-white mb-2">Solver Controls</h3>
+            <p className="text-slate-300 text-sm max-w-md">
+              Start the simulation or import a previous run.
+            </p>
+          </div>
           
-          <Button
-            onClick={onReset}
-            variant="outline"
-            className="w-28 border-rose-500/50 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200"
-          >
-            <RotateCcw className="w-4 h-4 mr-2" />
-            Reset
-          </Button>
-
-          <div className="flex gap-3">
-             <Button
-                onClick={handleDownload}
-                variant="outline"
-                className="border-sky-500/50 text-sky-300 hover:bg-sky-500/20 hover:text-sky-200"
-                disabled={stats.totalRuns === 0}
-              >
-                <Download className="w-4 h-4 mr-2" />
-                CSV Export
-              </Button>
-              {isOwner && (
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              onClick={isRunning ? onPause : onStart}
+              className={`w-28 ${
+                isRunning 
+                  ? 'bg-orange-600 hover:bg-orange-700' 
+                  : 'bg-green-600 hover:bg-green-700'
+              } text-white`}
+            >
+              {isRunning ? (
                 <>
-                  <Button
-                    onClick={handleGlobalStatsDownload}
-                    variant="outline"
-                    className="border-purple-500/50 text-purple-300 hover:bg-purple-500/20 hover:text-purple-200"
-                    disabled={stats.totalRuns === 0}
-                  >
-                    <Globe className="w-4 h-4 mr-2" />
-                    Global Stats Export
-                  </Button>
-                  <Button
-                    onClick={triggerFileUpload}
-                    variant="outline"
-                    className="border-sky-500/50 text-sky-300 hover:bg-sky-500/20 hover:text-sky-200"
-                  >
-                    <Upload className="w-4 h-4 mr-2" />
-                    CSV Import
-                  </Button>
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    onChange={handleFileUpload}
-                    className="hidden"
-                    accept=".csv"
-                  />
+                  <Pause className="w-4 h-4 mr-2" />
+                  Pause
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4 mr-2" />
+                  Start
                 </>
               )}
+            </Button>
+            
+            <Button
+              onClick={onReset}
+              variant="outline"
+              className="w-28 border-rose-500/50 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200"
+            >
+              <RotateCcw className="w-4 h-4 mr-2" />
+              Reset
+            </Button>
+
+            <div className="flex gap-3">
+              <Button
+                  onClick={handleDownload}
+                  variant="outline"
+                  className="border-sky-500/50 text-sky-300 hover:bg-sky-500/20 hover:text-sky-200"
+                  disabled={stats.totalRuns === 0}
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  CSV Export
+                </Button>
+                {isOwner && (
+                  <>
+                    <Button
+                      onClick={handleGlobalStatsDownload}
+                      variant="outline"
+                      className="border-purple-500/50 text-purple-300 hover:bg-purple-500/20 hover:text-purple-200"
+                      disabled={stats.totalRuns === 0}
+                    >
+                      <Globe className="w-4 h-4 mr-2" />
+                      Global Stats Export
+                    </Button>
+                    
+                    <div className="flex items-center gap-2 pl-2 border-l border-slate-700 ml-2">
+                       <div className="flex items-center space-x-2">
+                         <Switch 
+                           id="merge-mode" 
+                           checked={mergeMode}
+                           onCheckedChange={handleMergeToggle}
+                           className="data-[state=checked]:bg-amber-600"
+                         />
+                         <Label htmlFor="merge-mode" className="text-xs text-slate-400 cursor-pointer">
+                           Merge
+                         </Label>
+                       </div>
+
+                       <Button
+                        onClick={triggerFileUpload}
+                        variant="outline"
+                        className={`border-sky-500/50 hover:bg-sky-500/20 hover:text-sky-200 ${mergeMode ? 'text-amber-400 border-amber-500/50 hover:text-amber-300' : 'text-sky-300'}`}
+                      >
+                        <Upload className="w-4 h-4 mr-2" />
+                        {mergeMode ? 'Merge CSV' : 'Import CSV'}
+                      </Button>
+                    </div>
+                    
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleFileUpload}
+                      className="hidden"
+                      accept=".csv"
+                    />
+                  </>
+                )}
+            </div>
           </div>
         </div>
-      </div>
 
-      <div className="mt-6 pt-6 border-t border-slate-800">
-        <h3 className="text-xl font-bold text-white mb-4">Solver Configuration</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-2">
-                <Label htmlFor="iterations-input" className="text-slate-300">
-                    Iterations per Second
-                </Label>
-                <div className="flex gap-2">
-                    <Input
-                        id="iterations-input"
-                        type="number"
-                        min="1"
-                        max="10000"
-                        step="1"
-                        value={localIterations}
-                        onChange={handleIterationsChange}
-                        className="bg-slate-800/50 border-slate-700 text-white"
-                    />
-                    <Button
-                        onClick={setMaxIterations}
-                        variant="outline"
-                        className="border-slate-700 text-slate-300 hover:bg-slate-700 px-3"
-                    >
-                        Max
-                    </Button>
-                </div>
-            </div>
+        <div className="mt-6 pt-6 border-t border-slate-800">
+          <h3 className="text-xl font-bold text-white mb-4">Solver Configuration</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-2">
+                  <Label htmlFor="iterations-input" className="text-slate-300">
+                      Iterations per Second
+                  </Label>
+                  <div className="flex gap-2">
+                      <Input
+                          id="iterations-input"
+                          type="number"
+                          min="1"
+                          max="10000"
+                          step="1"
+                          value={localIterations}
+                          onChange={handleIterationsChange}
+                          className="bg-slate-800/50 border-slate-700 text-white"
+                      />
+                      <Button
+                          onClick={setMaxIterations}
+                          variant="outline"
+                          className="border-slate-700 text-slate-300 hover:bg-slate-700 px-3"
+                      >
+                          Max
+                      </Button>
+                  </div>
+              </div>
 
-            <div className="space-y-2">
-                <Label htmlFor="update-input" className="text-slate-300">
-                    Board Update Frequency
-                </Label>
-                <div className="flex gap-2">
-                    <Input
-                        id="update-input"
-                        type="number"
-                        min="1"
-                        max="100"
-                        step="1"
-                        value={localUpdateFreq}
-                        onChange={handleUpdateFreqChange}
-                        className="bg-slate-800/50 border-slate-700 text-white"
-                    />
-                    <Button
-                        onClick={setMaxUpdateFreq}
-                        variant="outline"
-                        className="border-slate-700 text-slate-300 hover:bg-slate-700 px-3"
-                    >
-                        Max
-                    </Button>
-                </div>
-            </div>
+              <div className="space-y-2">
+                  <Label htmlFor="update-input" className="text-slate-300">
+                      Board Update Frequency
+                  </Label>
+                  <div className="flex gap-2">
+                      <Input
+                          id="update-input"
+                          type="number"
+                          min="1"
+                          max="100"
+                          step="1"
+                          value={localUpdateFreq}
+                          onChange={handleUpdateFreqChange}
+                          className="bg-slate-800/50 border-slate-700 text-white"
+                      />
+                      <Button
+                          onClick={setMaxUpdateFreq}
+                          variant="outline"
+                          className="border-slate-700 text-slate-300 hover:bg-slate-700 px-3"
+                      >
+                          Max
+                      </Button>
+                  </div>
+              </div>
+          </div>
+          
+          <div className="mt-4 flex items-center space-x-3">
+              <Switch
+                  id="calibration-switch"
+                  checked={mlParams.useCalibration}
+                  onCheckedChange={(checked) => setMlParams(p => ({ ...p, useCalibration: checked }))}
+              />
+              <Label htmlFor="calibration-switch" className="text-slate-300">
+                  Data Collection Mode (ML Disabled)
+              </Label>
+          </div>
         </div>
         
-        <div className="mt-4 flex items-center space-x-3">
-            <Switch
-                id="calibration-switch"
-                checked={mlParams.useCalibration}
-                onCheckedChange={(checked) => setMlParams(p => ({ ...p, useCalibration: checked }))}
-            />
-            <Label htmlFor="calibration-switch" className="text-slate-300">
-                Data Collection Mode (ML Disabled)
-            </Label>
-        </div>
+        {currentStats && (
+          <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="text-center bg-slate-800/50 rounded-lg p-3">
+              <div className="text-xs text-slate-400 uppercase tracking-wide">
+                Total Runs
+              </div>
+              <div className="text-2xl font-bold text-white mt-1">
+                {currentStats.totalRuns?.toLocaleString() || 0}
+              </div>
+            </div>
+            
+            <div className="text-center bg-slate-800/50 rounded-lg p-3">
+              <div className="text-xs text-slate-400 uppercase tracking-wide">
+                Best Score
+              </div>
+              <div className="text-2xl font-bold text-green-400 mt-1">
+                {currentStats.bestScore || 0}
+              </div>
+            </div>
+            
+            <div className="text-center bg-slate-800/50 rounded-lg p-3">
+              <div className="text-xs text-slate-400 uppercase tracking-wide">
+                Avg Score
+              </div>
+              <div className="text-2xl font-bold text-blue-400 mt-1">
+                {currentStats.avgScore ? currentStats.avgScore.toFixed(1) : '0.0'}
+              </div>
+            </div>
+            
+            <div className="text-center bg-slate-800/50 rounded-lg p-3">
+              <div className="text-xs text-slate-400 uppercase tracking-wide">
+                Solutions
+              </div>
+              <div className="text-2xl font-bold text-purple-400 mt-1">
+                {currentStats.completedSolutions || 0}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
-      
-      {currentStats && (
-        <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="text-center bg-slate-800/50 rounded-lg p-3">
-             <div className="text-xs text-slate-400 uppercase tracking-wide">
-              Total Runs
+
+      <AlertDialog open={showMergeWarning} onOpenChange={setShowMergeWarning}>
+        <AlertDialogContent className="bg-slate-900 border-slate-800 text-white">
+          <AlertDialogHeader>
+            <div className="flex items-center gap-2 text-amber-500 mb-2">
+              <AlertTriangle className="h-5 w-5" />
+              <AlertDialogTitle>Risk of Data Corruption</AlertDialogTitle>
             </div>
-            <div className="text-2xl font-bold text-white mt-1">
-              {currentStats.totalRuns?.toLocaleString() || 0}
-            </div>
-          </div>
-          
-          <div className="text-center bg-slate-800/50 rounded-lg p-3">
-            <div className="text-xs text-slate-400 uppercase tracking-wide">
-              Best Score
-            </div>
-            <div className="text-2xl font-bold text-green-400 mt-1">
-              {currentStats.bestScore || 0}
-            </div>
-          </div>
-          
-          <div className="text-center bg-slate-800/50 rounded-lg p-3">
-             <div className="text-xs text-slate-400 uppercase tracking-wide">
-              Avg Score
-            </div>
-            <div className="text-2xl font-bold text-blue-400 mt-1">
-              {currentStats.avgScore ? currentStats.avgScore.toFixed(1) : '0.0'}
-            </div>
-          </div>
-          
-          <div className="text-center bg-slate-800/50 rounded-lg p-3">
-            <div className="text-xs text-slate-400 uppercase tracking-wide">
-              Solutions
-            </div>
-            <div className="text-2xl font-bold text-purple-400 mt-1">
-              {currentStats.completedSolutions || 0}
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+            <AlertDialogDescription className="text-slate-300 space-y-2">
+              <p>
+                Merging data is <strong>only</strong> safe if you are combining runs from a <strong>different device</strong>.
+              </p>
+              <p>
+                If you import data that was already generated on this machine, you will <strong>double-count</strong> your statistics, which will permanently bias the ML model and degrade solver performance.
+              </p>
+              <p className="text-xs text-slate-400 mt-2 bg-slate-950 p-2 rounded border border-slate-800">
+                <strong>Recommendation:</strong> Unless you are aggregating unique datasets from a distributed cluster, you should leave this disabled (Replace Mode).
+              </p>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="bg-transparent border-slate-700 text-slate-300 hover:bg-slate-800">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={confirmMergeEnable}
+              className="bg-amber-600 text-white hover:bg-amber-700 border-0"
+            >
+              I Understand, Enable Merge
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
