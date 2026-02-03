@@ -1,6 +1,6 @@
-
 import React, { createContext, useState, useEffect, useCallback, useContext, useRef } from 'react';
 import { base44 } from '@/api/base44Client';
+import { supabase } from '@/lib/supabase-client'; //
 
 // --- Data (final version from user's code) ---
 const pieces = [
@@ -141,6 +141,7 @@ export const useSolver = () => useContext(SolverContext);
 export const SolverProvider = ({ children }) => {
   const [board, setBoard] = useState(Array(SIZE * SIZE).fill(null));
   const [isRunning, setIsRunning] = useState(false);
+  const [onlineCount, setOnlineCount] = useState(0); // STATE for online count
   
   const [currentRun, setCurrentRun] = useState(() => getInitialState('solver-currentRun', { run: 0, score: 0 }));
   const [stats, setStats] = useState(() => getInitialState('solver-stats', {
@@ -155,9 +156,38 @@ export const SolverProvider = ({ children }) => {
     iterationsPerSecond: 10000
   }));
 
-  // Track pending global runs to batch update
   const pendingGlobalRunsRef = useRef(0);
-  const lastGlobalUpdateRef = useRef(Date.now()); // Not explicitly used in the final version, but good to have if more complex logic is needed.
+
+  // --- NEW: Real-time Presence Logic ---
+  useEffect(() => {
+    // 1. Create a channel for 'online-users'
+    const channel = supabase.channel('online-users', {
+      config: {
+        presence: {
+          key: 'user', 
+        },
+      },
+    });
+
+    // 2. Subscribe to sync events
+    channel
+      .on('presence', { event: 'sync' }, () => {
+        const newState = channel.presenceState();
+        // The count is simply the number of unique presence keys
+        setOnlineCount(Object.keys(newState).length);
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          // 3. Track ourselves once connected
+          await channel.track({ online_at: new Date().toISOString() });
+        }
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+  // ------------------------------------
 
   useEffect(() => {
     localStorage.setItem('solver-currentRun', JSON.stringify(currentRun));
@@ -168,7 +198,6 @@ export const SolverProvider = ({ children }) => {
     localStorage.setItem('solver-mlParams', JSON.stringify(mlParams));
   }, [currentRun, stats, hintAdjacencyStats, globalScoreDistribution, placementAttemptCounts, mlParams]);
 
-  // Batch update global runs every 10 seconds
   useEffect(() => {
     const interval = setInterval(async () => {
       if (pendingGlobalRunsRef.current > 0) {
@@ -192,11 +221,10 @@ export const SolverProvider = ({ children }) => {
           }
         } catch (error) {
           console.error('Failed to update global runs:', error);
-          // Put the runs back if update failed, to be retried in the next interval
           pendingGlobalRunsRef.current += runsToAdd;
         }
       }
-    }, 10000); // Update every 10 seconds
+    }, 10000); 
     
     return () => clearInterval(interval);
   }, []);
@@ -384,7 +412,6 @@ export const SolverProvider = ({ children }) => {
         completedSolutions: (stats.completedSolutions || 0) + (score === (SIZE * SIZE) ? 1 : 0)
     });
 
-    // Increment pending global runs counter (will be batched every 10 seconds)
     pendingGlobalRunsRef.current += 1;
 
     setGlobalScoreDistribution(prevDist => {
@@ -560,6 +587,7 @@ export const SolverProvider = ({ children }) => {
   }, [hintAdjacencyStats, mlParams]);
 
   const value = {
+    onlineCount, // EXPORTED HERE
     board, isRunning, currentRun, stats, hintAdjacencyStats, globalScoreDistribution, placementAttemptCounts, pieces, hints, mlParams,
     handleStart, handlePause, handleReset, loadBackupData, getSelectionPercentages, setMlParams
   };

@@ -9,13 +9,15 @@ import { useAuth } from "@/lib/AuthContext";
 import PuzzleBoard from "../components/puzzle/PuzzleBoard";
 import SolverControls from "../components/puzzle/SolverControls";
 import HintAnalysis from "../components/puzzle/HintAnalysis";
-import DebugPanel from "../components/puzzle/DebugPanel";
+// DebugPanel removed as requested earlier
+// import DebugPanel from "../components/puzzle/DebugPanel";
 
 export default function SolverPage() {
   const {
     board, isRunning, currentRun, stats, hints, mlParams,
     handleStart, handlePause, handleReset,
-    hintAdjacencyStats, pieces
+    hintAdjacencyStats, pieces,
+    onlineCount // NEW: Get the real-time count from context
   } = useSolver();
 
   const { user: authUser, isAuthenticated } = useAuth();
@@ -53,13 +55,8 @@ export default function SolverPage() {
     recordVisitMutation.mutate();
   }, []);
 
-  // Calculate online visitors (visited in last 5 minutes)
-  const onlineVisitors = pageViews.filter(view => {
-    const viewTime = new Date(view.created_at);
-    const now = new Date();
-    const diffMinutes = (now - viewTime) / (1000 * 60);
-    return diffMinutes <= 5;
-  }).length;
+  // Note: We've removed the manual 'onlineVisitors' calculation (diffMinutes <= 5)
+  // in favor of the real-time 'onlineCount' from SolverContext.
 
   // Get total global runs
   const globalRunsStat = globalStats.find(stat => stat.stat_name === 'total_global_runs');
@@ -93,7 +90,7 @@ export default function SolverPage() {
               <div className="flex items-center gap-2 ml-2 pl-2 border-l border-slate-700">
                 <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
                 <span className="text-sm text-green-400 font-medium leading-none">
-                  {onlineVisitors} Online
+                  {onlineCount} Online
                 </span>
               </div>
             </div>
@@ -147,7 +144,7 @@ export default function SolverPage() {
 
         <HintAnalysis hintAdjacencyStats={hintAdjacencyStats} pieces={pieces} />
 
-  </div>
-</div>
+      </div>
+    </div>
   );
 }
