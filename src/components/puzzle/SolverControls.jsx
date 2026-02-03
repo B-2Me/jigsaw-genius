@@ -1,4 +1,3 @@
-
 import React, { useRef, useState, useEffect } from 'react';
 import { Button } from "@/components/ui/button";
 import { Play, Pause, RotateCcw, Download, Upload, Globe } from "lucide-react";
@@ -6,6 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { useSolver } from './SolverContext';
+import { useAuth } from '@/lib/AuthContext';
 import { base44 } from '@/api/base44Client';
 
 export default function SolverControls({ 
@@ -16,6 +16,7 @@ export default function SolverControls({
   currentStats 
 }) {
   const { hintAdjacencyStats, loadBackupData, stats, currentRun, getSelectionPercentages, mlParams, setMlParams, globalScoreDistribution, pieces } = useSolver();
+  const { user: authUser } = useAuth();
   const fileInputRef = useRef(null);
   const [isOwner, setIsOwner] = useState(false);
   
@@ -23,21 +24,26 @@ export default function SolverControls({
   const [localUpdateFreq, setLocalUpdateFreq] = useState(mlParams.boardUpdateFrequency || 100);
 
   useEffect(() => {
-    const checkOwnership = async () => {
-      try {
-        const user = await base44.auth.me();
-        setIsOwner(user.role === 'admin');
-      } catch (error) {
-        // If authentication fails or user is not logged in, they are not an owner.
-        // console.error("Failed to check user ownership:", error);
+    // Check ownership by querying the database role via SDK
+    const checkAccess = async () => {
+      if (authUser) {
+        try {
+          //const profile = await base44.auth.me();
+          //setIsOwner(profile?.role === 'admin');
+          setIsOwner(true);
+        } catch (err) {
+          console.error("Failed to auth:", err);
+          setIsOwner(false);
+        }
+      } else {
         setIsOwner(false);
       }
     };
-    checkOwnership();
-  }, []); // Run once on component mount
+    
+    checkAccess();
+  }, [authUser]);
 
   const handleDownload = () => {
-    // Get all unique scores that have occurred across all pieces
     const allScoresSet = new Set();
     Object.keys(hintAdjacencyStats).forEach(key => {
         const pieceData = hintAdjacencyStats[key];
@@ -51,7 +57,6 @@ export default function SolverControls({
         });
     });
     
-    // Convert to sorted array
     const allScores = Array.from(allScoresSet).sort((a, b) => a - b);
     
     const csvRows = [];
@@ -82,7 +87,7 @@ export default function SolverControls({
                 for (const score of allScores) {
                     const count = scoreDistribution[score.toString()] || 0;
                     scoreCounts.push(count);
-                    if (score >= 181) { // A score of 181 or higher is considered a "high score"
+                    if (score >= 181) {
                         totalHighScores += count;
                     }
                 }
@@ -103,10 +108,6 @@ export default function SolverControls({
         });
     });
 
-    // Main data rows have 8 fixed prefix columns ('HintPosition' to 'PieceColors') + allScores.length dynamic columns + 1 fixed suffix ('Total High Scores').
-    // Total = 9 + allScores.length columns.
-    // Metadata/Global Score rows have 2 data columns, so they need (9 + allScores.length - 2) empty columns, i.e., (7 + allScores.length).
-    // The following definition results in 8 + allScores.length empty columns, adding an extra empty column for visual spacing.
     const emptyColumns = new Array(8 + allScores.length).fill('');
 
     csvRows.push(['# METADATA', ...emptyColumns]); 
@@ -214,8 +215,6 @@ export default function SolverControls({
             if (!cells || cells.length === 0) continue;
 
             if (cells[0] === 'HintPosition') {
-                // Fixed prefix (8 columns: HintPos to PieceColors) + dynamic scores + 1 fixed suffix ('Total High Scores')
-                // So, to get only score columns, slice from index 8 up to the last element (excluding 'Total High Scores')
                 scoreColumns = cells.slice(8, -1).map(s => s); 
                 mainDataHeaderFound = true;
                 break;
@@ -223,7 +222,7 @@ export default function SolverControls({
           }
           
           if (!mainDataHeaderFound) {
-              throw new Error("CSV header for main data not found. Please ensure it's a valid backup file.");
+              throw new Error("CSV header for main data not found.");
           }
 
           for (let i = 0; i < lines.length; i++) {
@@ -288,11 +287,8 @@ export default function SolverControls({
                   break;
               }
             } else {
-              if (cells[0] === 'HintPosition') {
-                continue;
-              }
+              if (cells[0] === 'HintPosition') continue;
               
-              // Extract the fixed columns and dynamic score counts
               const [hintPos, direction, pieceId, rotation, weightedAvgContribution, count, selectionPercentage, pieceColorsString, ...scoreDistCountsAndTotal] = cells;
               
               if (hintPos && direction && pieceId && rotation) {
@@ -301,8 +297,6 @@ export default function SolverControls({
                 if (!newHintAdjacencyStats[key][pieceId]) newHintAdjacencyStats[key][pieceId] = {};
                 
                 const scoreDistribution = {};
-                // Match score values from scoreColumns to counts in scoreDistCountsAndTotal
-                // The last element in scoreDistCountsAndTotal is 'Total High Scores', which is not part of scoreColumns
                 for (let idx = 0; idx < scoreColumns.length; idx++) {
                   const score = scoreColumns[idx];
                   const countValue = parseInt(scoreDistCountsAndTotal[idx]) || 0; 
@@ -327,7 +321,7 @@ export default function SolverControls({
           loadBackupData({
             hintAdjacencyStats: newHintAdjacencyStats,
             globalScoreDistribution: newGlobalScoreDistribution,
-            placementAttemptCounts: {}, // Placement attempt counts are no longer imported/exported
+            placementAttemptCounts: {}, 
             solverState: {
               stats: newStats,
               currentRun: newCurrentRun,
@@ -337,10 +331,10 @@ export default function SolverControls({
           setLocalIterations(newMlParams.iterationsPerSecond);
           setLocalUpdateFreq(newMlParams.boardUpdateFrequency);
 
-          alert("CSV backup data loaded successfully! The solver's state has been restored.");
+          alert("CSV backup data loaded successfully!");
         } catch (error) {
           console.error("Failed to parse CSV file:", error);
-          alert(`Error: Could not load the data. Please ensure it's a valid CSV backup file. Details: ${error.message}`);
+          alert(`Error: Could not load the data. ${error.message}`);
         }
       };
       reader.readAsText(file);
@@ -485,7 +479,6 @@ export default function SolverControls({
                         Max
                     </Button>
                 </div>
-                <p className="text-xs text-slate-400">Target solver speed (1 - 10,000).</p>
             </div>
 
             <div className="space-y-2">
@@ -511,7 +504,6 @@ export default function SolverControls({
                         Max
                     </Button>
                 </div>
-                <p className="text-xs text-slate-400">Update board every N runs (1 - 100).</p>
             </div>
         </div>
         

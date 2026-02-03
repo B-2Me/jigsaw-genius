@@ -1,14 +1,15 @@
-
 import React, { useEffect } from "react";
 import { base44 } from "@/api/base44Client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Info, Eye, TrendingUp } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useSolver } from "../components/puzzle/SolverContext";
+import { useAuth } from "@/lib/AuthContext";
 
 import PuzzleBoard from "../components/puzzle/PuzzleBoard";
 import SolverControls from "../components/puzzle/SolverControls";
 import HintAnalysis from "../components/puzzle/HintAnalysis";
+import DebugPanel from "../components/puzzle/DebugPanel";
 
 export default function SolverPage() {
   const {
@@ -17,16 +18,17 @@ export default function SolverPage() {
     hintAdjacencyStats, pieces
   } = useSolver();
 
+  const { user: authUser, isAuthenticated } = useAuth();
   const queryClient = useQueryClient();
 
-  // Track page view
+  // Track page view - Using singular PageView entity as expected by SDK
   const { data: pageViews } = useQuery({
     queryKey: ['pageViews'],
     queryFn: () => base44.entities.PageView.list(),
     initialData: [],
   });
 
-  // Get global runs count
+  // Get global runs count - Using plural GlobalStats entity as expected by SDK
   const { data: globalStats } = useQuery({
     queryKey: ['globalStats'],
     queryFn: () => base44.entities.GlobalStats.list(),
@@ -35,18 +37,11 @@ export default function SolverPage() {
 
   const recordVisitMutation = useMutation({
     mutationFn: async () => {
-      try {
-        const user = await base44.auth.me();
-        return base44.entities.PageView.create({
-          page_name: "Solver",
-          visitor_email: user.email
-        });
-      } catch (error) {
-        return base44.entities.PageView.create({
-          page_name: "Solver",
-          visitor_email: "anonymous"
-        });
-      }
+      // Use the pre-existing authUser from context instead of re-calling the API 
+      return base44.entities.PageView.create({
+        page_name: "Solver",
+        visitor_email: authUser?.email || "anonymous"
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['pageViews'] });
@@ -54,12 +49,13 @@ export default function SolverPage() {
   });
 
   useEffect(() => {
+    // Only record the visit once auth state is determined
     recordVisitMutation.mutate();
   }, []);
 
   // Calculate online visitors (visited in last 5 minutes)
   const onlineVisitors = pageViews.filter(view => {
-    const viewTime = new Date(view.created_date);
+    const viewTime = new Date(view.created_at);
     const now = new Date();
     const diffMinutes = (now - viewTime) / (1000 * 60);
     return diffMinutes <= 5;
@@ -112,7 +108,7 @@ export default function SolverPage() {
                   {totalGlobalRuns.toLocaleString()}
                 </span>
               </div>
-              <span className="text-xs text-slate-500 mt-1">updates every hour</span>
+              <span className="text-xs text-slate-500 mt-1">updates every 10 seconds</span>
             </div>
           </div>
         </div>
@@ -150,7 +146,8 @@ export default function SolverPage() {
         )}
 
         <HintAnalysis hintAdjacencyStats={hintAdjacencyStats} pieces={pieces} />
-      </div>
-    </div>
+
+  </div>
+</div>
   );
 }

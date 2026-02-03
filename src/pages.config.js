@@ -52,7 +52,7 @@ import __Layout from './Layout.jsx';
 
 
 export const PAGES = {
-    "Solver": Solver,
+    "Solver": Solver
 }
 
 export const pagesConfig = {
