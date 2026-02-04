@@ -75,16 +75,16 @@ export default function HintAnalysis() {
   const PiecePreview = ({ bestData, label }) => {
     if (!bestData) {
       return (
-        <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700 min-w-[150px]">
-          <div className="text-xs text-slate-400 mb-2 uppercase tracking-wide text-center">
+        <div className="bg-slate-800/50 rounded-lg p-2 md:p-4 border border-slate-700 min-w-[100px] md:min-w-[140px] w-full h-full">
+          <div className="text-[10px] md:text-xs text-slate-400 mb-2 uppercase tracking-wide text-center truncate">
             {label}
           </div>
-          <div className="relative w-12 h-12 bg-gradient-to-br from-slate-600 to-slate-700 rounded-lg mx-auto mb-3 border border-slate-600 flex items-center justify-center">
+          <div className="relative w-10 h-10 md:w-12 md:h-12 bg-gradient-to-br from-slate-600 to-slate-700 rounded-lg mx-auto mb-3 border border-slate-600 flex items-center justify-center">
             <span className="text-xs font-bold text-white/50">N/A</span>
           </div>
           <div className="text-center">
-            <div className="text-sm font-medium text-white mb-1">No Data</div>
-            <div className="text-xs text-slate-400">0%</div>
+            <div className="text-xs md:text-sm font-medium text-white mb-1">No Data</div>
+            <div className="text-[10px] md:text-xs text-slate-400">0%</div>
           </div>
         </div>
       );
@@ -94,37 +94,37 @@ export default function HintAnalysis() {
     if (!piece) return null;
 
     return (
-      <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700 min-w-[150px]">
-        <div className="text-xs text-slate-400 mb-2 uppercase tracking-wide text-center">
+      <div className="bg-slate-800/50 rounded-lg p-2 md:p-4 border border-slate-700 min-w-[100px] md:min-w-[140px] w-full h-full">
+        <div className="text-[10px] md:text-xs text-slate-400 mb-2 uppercase tracking-wide text-center truncate">
           {label}
         </div>
 
         <div 
-            className="relative w-12 h-12 bg-gradient-to-br from-slate-600 to-slate-700 rounded-lg mx-auto mb-3 border border-slate-600"
+            className="relative w-10 h-10 md:w-12 md:h-12 bg-gradient-to-br from-slate-600 to-slate-700 rounded-lg mx-auto mb-3 border border-slate-600"
             style={{ transform: `rotate(${bestData.rotation}deg)`}}
         >
           <div className="absolute inset-0">
-            <div className="absolute top-0 left-1/2 transform -translate-x-1/2 w-3 h-1.5 rounded-b" style={{ backgroundColor: EDGE_COLORS[piece.edges[0]] || '#1e293b' }} />
-            <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-1.5 h-3 rounded-l" style={{ backgroundColor: EDGE_COLORS[piece.edges[1]] || '#1e293b' }} />
-            <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-3 h-1.5 rounded-t" style={{ backgroundColor: EDGE_COLORS[piece.edges[2]] || '#1e293b' }} />
-            <div className="absolute left-0 top-1/2 transform -translate-y-1/2 w-1.5 h-3 rounded-r" style={{ backgroundColor: EDGE_COLORS[piece.edges[3]] || '#1e293b' }} />
+            <div className="absolute top-0 left-1/2 transform -translate-x-1/2 w-2.5 md:w-3 h-1 md:h-1.5 rounded-b" style={{ backgroundColor: EDGE_COLORS[piece.edges[0]] || '#1e293b' }} />
+            <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-1 md:w-1.5 h-2.5 md:h-3 rounded-l" style={{ backgroundColor: EDGE_COLORS[piece.edges[1]] || '#1e293b' }} />
+            <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-2.5 md:w-3 h-1 md:h-1.5 rounded-t" style={{ backgroundColor: EDGE_COLORS[piece.edges[2]] || '#1e293b' }} />
+            <div className="absolute left-0 top-1/2 transform -translate-y-1/2 w-1 md:w-1.5 h-2.5 md:h-3 rounded-r" style={{ backgroundColor: EDGE_COLORS[piece.edges[3]] || '#1e293b' }} />
           </div>
 
           <div className="absolute inset-0 flex items-center justify-center" style={{ transform: `rotate(-${bestData.rotation}deg)`}}>
-            <span className="text-xs font-bold text-white/70">
+            <span className="text-[10px] md:text-xs font-bold text-white/70">
               {piece.id}
             </span>
           </div>
         </div>
 
         <div className="text-center">
-          <div className="text-sm font-medium text-white mb-1">
+          <div className="text-xs md:text-sm font-medium text-white mb-1">
             Piece #{piece.id}
           </div>
-          <div className="text-xs text-slate-400 mb-1">
+          <div className="text-[10px] md:text-xs text-slate-400 mb-1 truncate">
             Rot: {bestData.rotation}° • Avg: {bestData.avgScore?.toFixed(1) || 'N/A'}
           </div>
-          <div className="text-xs font-bold text-green-400">
+          <div className="text-[10px] md:text-xs font-bold text-green-400">
             {bestData.percentage?.toFixed(2) || '0.00'}%
           </div>
         </div>
@@ -149,7 +149,7 @@ export default function HintAnalysis() {
           const bestWest = getBestPieceForAdjacency(position, 'west');
 
           return (
-            <div key={position} className="mb-10 last:mb-0 p-4 border border-slate-800 rounded-xl">
+            <div key={position} className="mb-10 last:mb-0 p-4 border border-slate-800 rounded-xl overflow-x-auto">
               <div className="flex flex-wrap items-center gap-4 mb-6">
                 <Badge className="bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
                   Hint at Position {position}
@@ -159,36 +159,39 @@ export default function HintAnalysis() {
                 </span>
               </div>
 
-              <div className="flex justify-center items-center">
-                  <div className="grid grid-cols-1 md:grid-cols-3 grid-rows-3 gap-4 w-auto">
-                    {/* North */}
-                    <div className="md:col-start-2 row-start-1 flex justify-center items-center">
+              <div className="flex justify-center items-center min-w-[320px]">
+                  {/* FORCED 3x3 GRID LAYOUT ALWAYS */}
+                  <div className="grid grid-cols-3 grid-rows-3 gap-2 md:gap-4 w-auto">
+                    
+                    {/* North - Row 1, Col 2 */}
+                    <div className="col-start-2 row-start-1 flex justify-center">
                       <PiecePreview bestData={bestNorth} label="North Best" />
                     </div>
 
-                    {/* West */}
-                    <div className="col-start-1 row-start-2 flex justify-center items-center">
+                    {/* West - Row 2, Col 1 */}
+                    <div className="col-start-1 row-start-2 flex justify-center">
                        <PiecePreview bestData={bestWest} label="West Best" />
                     </div>
 
-                    {/* Center - Hint Piece */}
-                    <div className="col-start-1 md:col-start-2 row-start-2 flex justify-center items-center bg-yellow-500/10 rounded-lg p-4 border border-yellow-500/30">
+                    {/* Center - Hint Piece - Row 2, Col 2 */}
+                    {/* MODIFIED: Removed 'items-center' to allow top alignment, added 'h-full' to fill grid cell height */}
+                    <div className="col-start-2 row-start-2 bg-yellow-500/10 rounded-lg p-2 md:p-4 border border-yellow-500/30 min-w-[100px] md:min-w-[140px] w-full h-full">
                       <div>
-                        <div className="text-xs text-yellow-400 mb-2 uppercase tracking-wide text-center">
+                        <div className="text-[10px] md:text-xs text-yellow-400 mb-2 uppercase tracking-wide text-center">
                           Fixed Hint
                         </div>
 
-                        <div className="relative w-12 h-12 bg-gradient-to-br from-yellow-400 to-amber-500 rounded-lg mx-auto mb-3">
+                        <div className="relative w-10 h-10 md:w-12 md:h-12 bg-gradient-to-br from-yellow-400 to-amber-500 rounded-lg mx-auto mb-3">
                           {hintPiece && (
                             <>
                               <div className="absolute inset-0" style={{ transform: `rotate(${hintData.rotation}deg)`}}>
-                                <div className="absolute top-0 left-1/2 transform -translate-x-1/2 w-3 h-1.5 rounded-b" style={{ backgroundColor: EDGE_COLORS[hintPiece.edges[0]] }} />
-                                <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-1.5 h-3 rounded-l" style={{ backgroundColor: EDGE_COLORS[hintPiece.edges[1]] }} />
-                                <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-3 h-1.5 rounded-t" style={{ backgroundColor: EDGE_COLORS[hintPiece.edges[2]] }} />
-                                <div className="absolute left-0 top-1/2 transform -translate-y-1/2 w-1.5 h-3 rounded-r" style={{ backgroundColor: EDGE_COLORS[hintPiece.edges[3]] }} />
+                                <div className="absolute top-0 left-1/2 transform -translate-x-1/2 w-2.5 md:w-3 h-1 md:h-1.5 rounded-b" style={{ backgroundColor: EDGE_COLORS[hintPiece.edges[0]] }} />
+                                <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-1 md:w-1.5 h-2.5 md:h-3 rounded-l" style={{ backgroundColor: EDGE_COLORS[hintPiece.edges[1]] }} />
+                                <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-2.5 md:w-3 h-1 md:h-1.5 rounded-t" style={{ backgroundColor: EDGE_COLORS[hintPiece.edges[2]] }} />
+                                <div className="absolute left-0 top-1/2 transform -translate-y-1/2 w-1 md:w-1.5 h-2.5 md:h-3 rounded-r" style={{ backgroundColor: EDGE_COLORS[hintPiece.edges[3]] }} />
                               </div>
                               <div className="absolute inset-0 flex items-center justify-center">
-                                <span className="text-xs font-bold text-slate-900">
+                                <span className="text-[10px] md:text-xs font-bold text-slate-900">
                                   {hintPiece.id}
                                 </span>
                               </div>
@@ -197,20 +200,20 @@ export default function HintAnalysis() {
                         </div>
 
                         <div className="text-center">
-                          <div className="text-sm font-medium text-yellow-400">
+                          <div className="text-xs md:text-sm font-medium text-yellow-400">
                             Piece #{hintData.id}
                           </div>
                         </div>
                       </div>
                     </div>
 
-                    {/* East */}
-                    <div className="col-start-1 md:col-start-3 row-start-2 flex justify-center items-center">
+                    {/* East - Row 2, Col 3 */}
+                    <div className="col-start-3 row-start-2 flex justify-center">
                        <PiecePreview bestData={bestEast} label="East Best" />
                     </div>
 
-                    {/* South */}
-                    <div className="md:col-start-2 row-start-3 flex justify-center items-center">
+                    {/* South - Row 3, Col 2 */}
+                    <div className="col-start-2 row-start-3 flex justify-center">
                        <PiecePreview bestData={bestSouth} label="South Best" />
                     </div>
                 </div>

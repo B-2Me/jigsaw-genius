@@ -1,19 +1,17 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Button } from "@/components/ui/button";
-import { Play, Pause, RotateCcw, Download, Upload, Globe, AlertTriangle } from "lucide-react";
+import { Play, Pause, RotateCcw, Download, Upload, Globe, FileUp, AlertTriangle, FileText } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter
+} from "@/components/ui/dialog";
 import { useSolver } from './SolverContext';
 import { useAuth } from '@/lib/AuthContext';
 import { base44 } from '@/api/base44Client';
@@ -34,9 +32,9 @@ export default function SolverControls({
   const [localIterations, setLocalIterations] = useState(mlParams.iterationsPerSecond || 10000); 
   const [localUpdateFreq, setLocalUpdateFreq] = useState(mlParams.boardUpdateFrequency || 100);
 
-  // Merge Mode Safety State
-  const [mergeMode, setMergeMode] = useState(false);
-  const [showMergeWarning, setShowMergeWarning] = useState(false);
+  // Import Modal State
+  const [pendingFile, setPendingFile] = useState(null);
+  const [showImportChoice, setShowImportChoice] = useState(false);
 
   useEffect(() => {
     const checkAccess = async () => {
@@ -54,24 +52,224 @@ export default function SolverControls({
     checkAccess();
   }, [authUser]);
 
-  // Handle the Merge Toggle Safety Check
-  const handleMergeToggle = (checked) => {
-    if (checked) {
-      // If turning ON, show warning first
-      setShowMergeWarning(true);
-    } else {
-      // If turning OFF, just do it
-      setMergeMode(false);
-    }
+  // Trigger file browser
+  const triggerFileUpload = () => {
+    fileInputRef.current.click();
   };
 
-  const confirmMergeEnable = () => {
-    setMergeMode(true);
-    setShowMergeWarning(false);
+  // Handle file selection -> Open Choice Modal
+  const handleFileSelect = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      setPendingFile(file);
+      setShowImportChoice(true);
+    }
+    event.target.value = null;
+  };
+
+  // Execute the import based on user choice
+  const executeImport = (mode) => {
+    if (!pendingFile) return;
+
+    const mergeMode = mode === 'merge';
+    const reader = new FileReader();
+    
+    reader.onload = (e) => {
+      try {
+        const csvContent = e.target.result;
+        const lines = csvContent.split('\n');
+        
+        const newHintAdjacencyStats = mergeMode 
+          ? JSON.parse(JSON.stringify(hintAdjacencyStats)) 
+          : {};
+        const newGlobalScoreDistribution = mergeMode 
+          ? { ...globalScoreDistribution } 
+          : {};
+        
+        let newStats = mergeMode 
+          ? { ...stats } 
+          : { totalRuns: 0, bestScore: 0, avgScore: 0, completedSolutions: 0 };
+          
+        let newCurrentRun = { run: 0, score: 0 }; 
+        
+        let newMlParams = { 
+          useCalibration: true, 
+          boardUpdateFrequency: 10, 
+          iterationsPerSecond: 100 
+        };
+        
+        let isMetadata = false;
+        let isGlobalScoreDist = false;
+        let scoreColumns = [];
+        let mainDataHeaderFound = false;
+        
+        // 1. Scan headers
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          const cells = parseCsvLine(line);
+          if (!cells || cells.length === 0) continue;
+
+          if (cells[0] === 'HintPosition') {
+              scoreColumns = cells.slice(8, -1).map(s => s); 
+              mainDataHeaderFound = true;
+              break;
+          }
+        }
+        
+        if (!mainDataHeaderFound) throw new Error("CSV header for main data not found.");
+
+        // 2. Parse Data
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          const cells = parseCsvLine(line);
+          if (!cells || cells.length === 0) continue;
+
+          if (cells[0] === '# METADATA') {
+            isMetadata = true;
+            isGlobalScoreDist = false;
+            continue;
+          }
+          if (cells[0] === '# GLOBAL SCORE DISTRIBUTION') {
+            isMetadata = false;
+            isGlobalScoreDist = true;
+            continue;
+          }
+          
+          if (isGlobalScoreDist) {
+            if (cells[0] === 'Score') continue;
+            const [score, count] = cells;
+            if (score && count) {
+              const countVal = parseInt(count) || 0;
+              newGlobalScoreDistribution[score] = mergeMode 
+                ? (newGlobalScoreDistribution[score] || 0) + countVal
+                : countVal;
+            }
+          } else if (isMetadata) {
+            const [key, value] = cells;
+            switch (key) {
+              case 'TotalRuns':
+                const runs = parseInt(value) || 0;
+                newStats.totalRuns = mergeMode ? newStats.totalRuns + runs : runs;
+                break;
+              case 'BestScore':
+                const score = parseInt(value) || 0;
+                newStats.bestScore = mergeMode ? Math.max(newStats.bestScore, score) : score;
+                break;
+              case 'AvgScore':
+                const importedAvg = parseFloat(value) || 0;
+                if (mergeMode) {
+                   const currentTotal = stats.totalRuns || 1;
+                   const importedTotal = (parseInt(lines.find(l => l.startsWith('TotalRuns'))?.split(',')[1]) || 1);
+                   const combinedAvg = ((stats.avgScore * currentTotal) + (importedAvg * importedTotal)) / (currentTotal + importedTotal);
+                   newStats.avgScore = combinedAvg || 0;
+                } else {
+                   newStats.avgScore = importedAvg;
+                }
+                break;
+              case 'CompletedSolutions':
+                const sols = parseInt(value) || 0;
+                newStats.completedSolutions = mergeMode ? newStats.completedSolutions + sols : sols;
+                break;
+              case 'UseCalibration':
+                if (!mergeMode) newMlParams.useCalibration = value === 'true';
+                break;
+              case 'BoardUpdateFrequency':
+                if (!mergeMode) newMlParams.boardUpdateFrequency = parseInt(value) || 10;
+                break;
+              case 'IterationsPerSecond':
+                if (!mergeMode) newMlParams.iterationsPerSecond = parseInt(value) || 100;
+                break;
+            }
+          } else {
+            if (cells[0] === 'HintPosition') continue;
+            
+            const [hintPos, direction, pieceIdStr, rotationStr, weightedAvgStr, countStr, , , ...scoreDistCountsAndTotal] = cells;
+            const pieceId = parseInt(pieceIdStr);
+            const rotation = parseInt(rotationStr);
+            
+            if (isNaN(pieceId) || isNaN(rotation)) continue;
+
+            if (hintPos && direction) {
+              const key = `${hintPos}-${direction}`;
+              if (!newHintAdjacencyStats[key]) newHintAdjacencyStats[key] = {};
+              if (!newHintAdjacencyStats[key][pieceId]) newHintAdjacencyStats[key][pieceId] = {};
+              
+              const scoreDistribution = {};
+              for (let idx = 0; idx < scoreColumns.length; idx++) {
+                const s = scoreColumns[idx];
+                const c = parseInt(scoreDistCountsAndTotal[idx]) || 0; 
+                if (c > 0) scoreDistribution[s] = c;
+              }
+
+              const parsedCount = parseInt(countStr) || 0;
+              const parsedWeightedAvg = parseFloat(weightedAvgStr) || 0;
+
+              const existingEntry = newHintAdjacencyStats[key][pieceId][rotation];
+              
+              if (existingEntry) {
+                  const totalWeightedSum = (existingEntry.weighted_avg_contribution * existingEntry.count) + (parsedWeightedAvg * parsedCount);
+                  const totalCount = existingEntry.count + parsedCount;
+                  
+                  Object.entries(scoreDistribution).forEach(([s, c]) => {
+                      existingEntry.scoreDistribution[s] = (existingEntry.scoreDistribution[s] || 0) + c;
+                  });
+
+                  existingEntry.weighted_sum_of_scores = totalWeightedSum;
+                  existingEntry.weighted_avg_contribution = totalCount > 0 ? totalWeightedSum / totalCount : 0;
+                  existingEntry.count = totalCount;
+              } else {
+                  newHintAdjacencyStats[key][pieceId][rotation] = {
+                      weighted_sum_of_scores: parsedWeightedAvg * parsedCount,
+                      weighted_avg_contribution: parsedWeightedAvg,
+                      count: parsedCount,
+                      scoreDistribution: scoreDistribution
+                  };
+              }
+            }
+          }
+        }
+        
+        loadBackupData({
+          hintAdjacencyStats: newHintAdjacencyStats,
+          globalScoreDistribution: newGlobalScoreDistribution,
+          placementAttemptCounts: {}, 
+          solverState: {
+            stats: newStats,
+            currentRun: newCurrentRun,
+            mlParams: mergeMode ? mlParams : newMlParams
+          }
+        });
+
+        if (!mergeMode) {
+          setLocalIterations(newMlParams.iterationsPerSecond);
+          setLocalUpdateFreq(newMlParams.boardUpdateFrequency);
+        }
+        
+        const modeMsg = mergeMode ? "MERGED" : "REPLACED";
+        console.log(`Success: CSV data has been ${modeMsg}.`);
+
+      } catch (error) {
+        console.error("Failed to parse CSV file:", error);
+        alert(`Error: Could not load the data. ${error.message}`);
+      }
+    };
+    reader.readAsText(pendingFile);
+    
+    setShowImportChoice(false);
+    setPendingFile(null);
+  };
+
+  const parseCsvLine = (line) => {
+    return line.match(/(?:[^,"]+|"[^"]*")+/g)?.map(cell => {
+      return cell.startsWith('"') && cell.endsWith('"')
+        ? cell.substring(1, cell.length - 1).replace(/""/g, '"')
+        : cell;
+    });
   };
 
   const handleDownload = () => {
-    // [Existing Export Logic - Unchanged]
     const allScoresSet = new Set();
     Object.keys(hintAdjacencyStats).forEach(key => {
         const pieceData = hintAdjacencyStats[key];
@@ -176,7 +374,6 @@ export default function SolverControls({
   };
 
   const handleGlobalStatsDownload = () => {
-    // [Existing Export Logic - Unchanged]
     const csvRows = [];
     csvRows.push(['Global Statistics Export', '', '', '', '', '', '', '', '']);
     csvRows.push(['']);
@@ -210,235 +407,6 @@ export default function SolverControls({
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-  };
-
-  const handleFileUpload = (event) => {
-    const file = event.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        try {
-          const csvContent = e.target.result;
-          const lines = csvContent.split('\n');
-          
-          // [Logic Switch] REPLACE vs MERGE
-          // If Merge: Start with deep copy of current state. 
-          // If Replace: Start with empty objects/zeros.
-          const newHintAdjacencyStats = mergeMode 
-            ? JSON.parse(JSON.stringify(hintAdjacencyStats)) 
-            : {};
-          const newGlobalScoreDistribution = mergeMode 
-            ? { ...globalScoreDistribution } 
-            : {};
-          
-          let newStats = mergeMode 
-            ? { ...stats } 
-            : { totalRuns: 0, bestScore: 0, avgScore: 0, completedSolutions: 0 };
-            
-          let newCurrentRun = { run: 0, score: 0 }; // Always reset current run on import
-          
-          let newMlParams = { 
-            useCalibration: true, 
-            boardUpdateFrequency: 10, 
-            iterationsPerSecond: 100 
-          };
-          
-          let isMetadata = false;
-          let isGlobalScoreDist = false;
-          let scoreColumns = [];
-
-          let mainDataHeaderFound = false;
-          
-          // Pre-scan for headers
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line) continue;
-            
-            const cells = line.match(/(?:[^,"]+|"[^"]*")+/g)?.map(cell => {
-              return cell.startsWith('"') && cell.endsWith('"')
-                ? cell.substring(1, cell.length - 1).replace(/""/g, '"')
-                : cell;
-            });
-            if (!cells || cells.length === 0) continue;
-
-            if (cells[0] === 'HintPosition') {
-                scoreColumns = cells.slice(8, -1).map(s => s); 
-                mainDataHeaderFound = true;
-                break;
-            }
-          }
-          
-          if (!mainDataHeaderFound) {
-              throw new Error("CSV header for main data not found.");
-          }
-
-          // Main Parse Loop
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line) continue;
-            
-            const cells = line.match(/(?:[^,"]+|"[^"]*")+/g)?.map(cell => {
-              return cell.startsWith('"') && cell.endsWith('"')
-                ? cell.substring(1, cell.length - 1).replace(/""/g, '"')
-                : cell;
-            });
-
-            if (!cells || cells.length === 0) continue;
-
-            if (cells[0] === '# METADATA') {
-              isMetadata = true;
-              isGlobalScoreDist = false;
-              continue;
-            }
-
-            if (cells[0] === '# GLOBAL SCORE DISTRIBUTION') {
-              isMetadata = false;
-              isGlobalScoreDist = true;
-              continue;
-            }
-            
-            if (isGlobalScoreDist) {
-              if (cells[0] === 'Score') continue;
-              const [score, count] = cells;
-              if (score && count) {
-                const countVal = parseInt(count) || 0;
-                if (mergeMode) {
-                  newGlobalScoreDistribution[score] = (newGlobalScoreDistribution[score] || 0) + countVal;
-                } else {
-                  newGlobalScoreDistribution[score] = countVal;
-                }
-              }
-            } else if (isMetadata) {
-              const [key, value] = cells;
-              switch (key) {
-                case 'TotalRuns':
-                  if (mergeMode) newStats.totalRuns += (parseInt(value) || 0);
-                  else newStats.totalRuns = parseInt(value) || 0;
-                  break;
-                case 'BestScore':
-                  if (mergeMode) newStats.bestScore = Math.max(newStats.bestScore, parseInt(value) || 0);
-                  else newStats.bestScore = parseInt(value) || 0;
-                  break;
-                case 'AvgScore':
-                  const importedAvg = parseFloat(value) || 0;
-                  if (mergeMode) {
-                     // Approximate weighted average merge (using TotalRuns as weight)
-                     // Note: This is an approximation if we don't have exact run counts for the current session vs imported
-                     const currentTotal = stats.totalRuns || 1;
-                     const importedTotal = (parseInt(lines.find(l => l.startsWith('TotalRuns'))?.split(',')[1]) || 1);
-                     const combinedAvg = ((stats.avgScore * currentTotal) + (importedAvg * importedTotal)) / (currentTotal + importedTotal);
-                     newStats.avgScore = combinedAvg || 0;
-                  } else {
-                     newStats.avgScore = importedAvg;
-                  }
-                  break;
-                case 'CompletedSolutions':
-                  if (mergeMode) newStats.completedSolutions += (parseInt(value) || 0);
-                  else newStats.completedSolutions = parseInt(value) || 0;
-                  break;
-                case 'CurrentRunNumber':
-                  // Always adopt the imported run number or keep 0? Usually just info.
-                  // For merge, we don't really change current run number.
-                  if (!mergeMode) newCurrentRun.run = parseInt(value) || 0;
-                  break;
-                case 'CurrentRunScore':
-                   if (!mergeMode) newCurrentRun.score = parseInt(value) || 0;
-                  break;
-                case 'UseCalibration':
-                  newMlParams.useCalibration = value === 'true';
-                  break;
-                case 'BoardUpdateFrequency':
-                  newMlParams.boardUpdateFrequency = parseInt(value) || 10;
-                  break;
-                case 'IterationsPerSecond':
-                  newMlParams.iterationsPerSecond = parseInt(value) || 100;
-                  break;
-              }
-            } else {
-              // --- HINT ADJACENCY STATS ---
-              if (cells[0] === 'HintPosition') continue;
-              
-              const [hintPos, direction, pieceIdStr, rotationStr, weightedAvgStr, countStr, , , ...scoreDistCountsAndTotal] = cells;
-              
-              const pieceId = parseInt(pieceIdStr);
-              const rotation = parseInt(rotationStr);
-              
-              if (isNaN(pieceId) || isNaN(rotation)) continue;
-              if (![0, 90, 180, 270].includes(rotation)) continue;
-
-              if (hintPos && direction) {
-                const key = `${hintPos}-${direction}`;
-                if (!newHintAdjacencyStats[key]) newHintAdjacencyStats[key] = {};
-                if (!newHintAdjacencyStats[key][pieceId]) newHintAdjacencyStats[key][pieceId] = {};
-                
-                const scoreDistribution = {};
-                for (let idx = 0; idx < scoreColumns.length; idx++) {
-                  const score = scoreColumns[idx];
-                  const countValue = parseInt(scoreDistCountsAndTotal[idx]) || 0; 
-                  if (countValue > 0) {
-                    scoreDistribution[score] = countValue;
-                  }
-                }
-
-                const parsedCount = parseInt(countStr) || 0;
-                const parsedWeightedAvg = parseFloat(weightedAvgStr) || 0;
-
-                // MERGE / REPLACE LOGIC for specific piece stats
-                const existingEntry = newHintAdjacencyStats[key][pieceId][rotation];
-                
-                if (existingEntry) {
-                    // Valid for both Merge Mode (combining CSV with State) 
-                    // AND Replace Mode (combining duplicate rows within CSV)
-                    const totalWeightedSum = (existingEntry.weighted_avg_contribution * existingEntry.count) + (parsedWeightedAvg * parsedCount);
-                    const totalCount = existingEntry.count + parsedCount;
-                    
-                    Object.entries(scoreDistribution).forEach(([score, count]) => {
-                        existingEntry.scoreDistribution[score] = (existingEntry.scoreDistribution[score] || 0) + count;
-                    });
-
-                    existingEntry.weighted_sum_of_scores = totalWeightedSum;
-                    existingEntry.weighted_avg_contribution = totalCount > 0 ? totalWeightedSum / totalCount : 0;
-                    existingEntry.count = totalCount;
-                } else {
-                    newHintAdjacencyStats[key][pieceId][rotation] = {
-                        weighted_sum_of_scores: parsedWeightedAvg * parsedCount,
-                        weighted_avg_contribution: parsedWeightedAvg,
-                        count: parsedCount,
-                        scoreDistribution: scoreDistribution
-                    };
-                }
-              }
-            }
-          }
-          
-          loadBackupData({
-            hintAdjacencyStats: newHintAdjacencyStats,
-            globalScoreDistribution: newGlobalScoreDistribution,
-            placementAttemptCounts: {}, 
-            solverState: {
-              stats: newStats,
-              currentRun: newCurrentRun,
-              mlParams: newMlParams
-            }
-          });
-          setLocalIterations(newMlParams.iterationsPerSecond);
-          setLocalUpdateFreq(newMlParams.boardUpdateFrequency);
-          
-          const modeMsg = mergeMode ? "MERGED" : "REPLACED";
-          alert(`Success: CSV data has been ${modeMsg} into the solver.`);
-
-        } catch (error) {
-          console.error("Failed to parse CSV file:", error);
-          alert(`Error: Could not load the data. ${error.message}`);
-        }
-      };
-      reader.readAsText(file);
-    }
-    event.target.value = null;
-  };
-
-  const triggerFileUpload = () => {
-    fileInputRef.current.click();
   };
 
   const handleIterationsChange = (e) => {
@@ -476,14 +444,15 @@ export default function SolverControls({
             </p>
           </div>
           
-          <div className="flex flex-wrap items-center gap-3">
+          {/* Responsive button container */}
+          <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
             <Button
               onClick={isRunning ? onPause : onStart}
-              className={`w-28 ${
+              className={`flex-1 md:flex-none md:w-28 ${
                 isRunning 
-                  ? 'bg-orange-600 hover:bg-orange-700' 
-                  : 'bg-green-600 hover:bg-green-700'
-              } text-white`}
+                  ? 'bg-orange-600 hover:bg-orange-700 shadow-[0_0_15px_rgba(234,88,12,0.3)] hover:shadow-[0_0_20px_rgba(234,88,12,0.6)]' 
+                  : 'bg-green-600 hover:bg-green-700 shadow-[0_0_15px_rgba(34,197,94,0.3)] hover:shadow-[0_0_20px_rgba(34,197,94,0.6)]'
+              } text-white transition-all duration-300 border-0`}
             >
               {isRunning ? (
                 <>
@@ -501,70 +470,57 @@ export default function SolverControls({
             <Button
               onClick={onReset}
               variant="outline"
-              className="w-28 border-rose-500/50 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200"
+              className="flex-1 md:flex-none md:w-28 bg-slate-800 border-rose-500/50 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200 transition-all duration-300 hover:shadow-[0_0_15px_rgba(244,63,94,0.5)]"
             >
               <RotateCcw className="w-4 h-4 mr-2" />
               Reset
             </Button>
 
-            <div className="flex gap-3">
-              <Button
-                  onClick={handleDownload}
+            <Button
+                onClick={handleDownload}
+                variant="outline"
+                className="flex-1 md:flex-none bg-slate-800 border-sky-500/50 text-sky-300 hover:bg-sky-500/20 hover:text-sky-200 transition-all duration-300 hover:shadow-[0_0_15px_rgba(14,165,233,0.5)]"
+                disabled={stats.totalRuns === 0}
+              >
+                <Download className="w-4 h-4 mr-2" />
+                CSV Export
+            </Button>
+
+            {isOwner && (
+              <>
+                <Button
+                  onClick={handleGlobalStatsDownload}
                   variant="outline"
-                  className="border-sky-500/50 text-sky-300 hover:bg-sky-500/20 hover:text-sky-200"
+                  className="flex-1 md:flex-none bg-slate-800 border-purple-500/50 text-purple-300 hover:bg-purple-500/20 hover:text-purple-200 whitespace-nowrap transition-all duration-300 hover:shadow-[0_0_15px_rgba(168,85,247,0.5)]"
                   disabled={stats.totalRuns === 0}
                 >
-                  <Download className="w-4 h-4 mr-2" />
-                  CSV Export
+                  <Globe className="w-4 h-4 mr-2" />
+                  <span className="hidden sm:inline">Global Stats Export</span>
+                  <span className="inline sm:hidden">Global Stats</span>
                 </Button>
-                {isOwner && (
-                  <>
-                    <Button
-                      onClick={handleGlobalStatsDownload}
-                      variant="outline"
-                      className="border-purple-500/50 text-purple-300 hover:bg-purple-500/20 hover:text-purple-200"
-                      disabled={stats.totalRuns === 0}
-                    >
-                      <Globe className="w-4 h-4 mr-2" />
-                      Global Stats Export
-                    </Button>
-                    
-                    <div className="flex items-center gap-2 pl-2 border-l border-slate-700 ml-2">
-                       <div className="flex items-center space-x-2">
-                         <Switch 
-                           id="merge-mode" 
-                           checked={mergeMode}
-                           onCheckedChange={handleMergeToggle}
-                           className="data-[state=checked]:bg-amber-600"
-                         />
-                         <Label htmlFor="merge-mode" className="text-xs text-slate-400 cursor-pointer">
-                           Merge
-                         </Label>
-                       </div>
-
-                       <Button
-                        onClick={triggerFileUpload}
-                        variant="outline"
-                        className={`border-sky-500/50 hover:bg-sky-500/20 hover:text-sky-200 ${mergeMode ? 'text-amber-400 border-amber-500/50 hover:text-amber-300' : 'text-sky-300'}`}
-                      >
-                        <Upload className="w-4 h-4 mr-2" />
-                        {mergeMode ? 'Merge CSV' : 'Import CSV'}
-                      </Button>
-                    </div>
-                    
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      onChange={handleFileUpload}
-                      className="hidden"
-                      accept=".csv"
-                    />
-                  </>
-                )}
-            </div>
+                
+                <Button
+                  onClick={triggerFileUpload}
+                  variant="outline"
+                  className="flex-1 md:flex-none bg-slate-800 border-sky-500/50 hover:bg-sky-500/20 hover:text-sky-200 text-sky-300 transition-all duration-300 hover:shadow-[0_0_15px_rgba(14,165,233,0.5)]"
+                >
+                  <Upload className="w-4 h-4 mr-2" />
+                  Import Data
+                </Button>
+                
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileSelect}
+                  className="hidden"
+                  accept=".csv"
+                />
+              </>
+            )}
           </div>
         </div>
 
+        {/* Configuration Section */}
         <div className="mt-6 pt-6 border-t border-slate-800">
           <h3 className="text-xl font-bold text-white mb-4">Solver Configuration</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -586,7 +542,7 @@ export default function SolverControls({
                       <Button
                           onClick={setMaxIterations}
                           variant="outline"
-                          className="border-slate-700 text-slate-300 hover:bg-slate-700 px-3"
+                          className="bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 px-3 hover:text-white transition-all duration-300 hover:shadow-[0_0_10px_rgba(148,163,184,0.3)]"
                       >
                           Max
                       </Button>
@@ -611,7 +567,7 @@ export default function SolverControls({
                       <Button
                           onClick={setMaxUpdateFreq}
                           variant="outline"
-                          className="border-slate-700 text-slate-300 hover:bg-slate-700 px-3"
+                          className="bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 px-3 hover:text-white transition-all duration-300 hover:shadow-[0_0_10px_rgba(148,163,184,0.3)]"
                       >
                           Max
                       </Button>
@@ -672,38 +628,62 @@ export default function SolverControls({
         )}
       </div>
 
-      <AlertDialog open={showMergeWarning} onOpenChange={setShowMergeWarning}>
-        <AlertDialogContent className="bg-slate-900 border-slate-800 text-white">
-          <AlertDialogHeader>
-            <div className="flex items-center gap-2 text-amber-500 mb-2">
-              <AlertTriangle className="h-5 w-5" />
-              <AlertDialogTitle>Risk of Data Corruption</AlertDialogTitle>
-            </div>
-            <AlertDialogDescription className="text-slate-300 space-y-2">
-              <p>
-                Merging data is <strong>only</strong> safe if you are combining runs from a <strong>different device</strong>.
-              </p>
-              <p>
-                If you import data that was already generated on this machine, you will <strong>double-count</strong> your statistics, which will permanently bias the ML model and degrade solver performance.
-              </p>
-              <p className="text-xs text-slate-400 mt-2 bg-slate-950 p-2 rounded border border-slate-800">
-                <strong>Recommendation:</strong> Unless you are aggregating unique datasets from a distributed cluster, you should leave this disabled (Replace Mode).
-              </p>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel className="bg-transparent border-slate-700 text-slate-300 hover:bg-slate-800">
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction 
-              onClick={confirmMergeEnable}
-              className="bg-amber-600 text-white hover:bg-amber-700 border-0"
+      {/* Import Strategy Choice Modal */}
+      <Dialog open={showImportChoice} onOpenChange={setShowImportChoice}>
+        <DialogContent className="bg-slate-900 border-slate-800 text-white sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-xl">
+              <FileUp className="w-5 h-5 text-indigo-400" />
+              Import Strategy
+            </DialogTitle>
+            <DialogDescription className="text-slate-400 pt-2">
+              How would you like to handle the data from <span className="text-white font-medium">{pendingFile?.name}</span>?
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid grid-cols-1 gap-4 py-4">
+            <button
+              onClick={() => executeImport('replace')}
+              className="flex items-start gap-4 p-4 rounded-xl border border-slate-700 bg-slate-800/50 hover:bg-slate-800 hover:border-indigo-500/50 transition-all group text-left"
             >
-              I Understand, Enable Merge
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+              <div className="p-2 rounded-lg bg-indigo-500/20 text-indigo-400 group-hover:bg-indigo-500/30">
+                <FileText className="w-6 h-6" />
+              </div>
+              <div>
+                <h4 className="font-bold text-white mb-1">Replace Current Data</h4>
+                <p className="text-sm text-slate-400 leading-relaxed">
+                  Overwrites the statistics currently in this session's memory.
+                  <span className="block mt-1 text-indigo-300 text-xs">Recommended for loading backups or starting fresh.</span>
+                </p>
+              </div>
+            </button>
+
+            <button
+              onClick={() => executeImport('merge')}
+              className="flex items-start gap-4 p-4 rounded-xl border border-slate-700 bg-slate-800/50 hover:bg-slate-800 hover:border-amber-500/50 transition-all group text-left"
+            >
+              <div className="p-2 rounded-lg bg-amber-500/20 text-amber-400 group-hover:bg-amber-500/30">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h4 className="font-bold text-white mb-1">Merge with Current Data</h4>
+                <p className="text-sm text-slate-400 leading-relaxed">
+                  Combines the file data with your active session.
+                  <span className="block mt-1 text-amber-300 text-xs">
+                    Only use if the file contains unique runs from a different device.
+                  </span>
+                </p>
+              </div>
+            </button>
+          </div>
+          
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setShowImportChoice(false)} className="text-slate-400 hover:text-white">
+              Cancel Import
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

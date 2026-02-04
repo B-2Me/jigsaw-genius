@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '@/lib/AuthContext';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,7 +22,7 @@ export default function AuthModal() {
         await signUp(email, password, fullName);
         await signIn(email, password);
       }
-      setIsAuthModalOpen(false); // Close on success
+      setIsAuthModalOpen(false); 
     } catch (err) {
       alert(err.message);
     }
@@ -35,9 +35,15 @@ export default function AuthModal() {
           <DialogTitle className="text-2xl font-bold text-center">
             {isLogin ? 'Login' : 'Sign Up'}
           </DialogTitle>
+          <DialogDescription className="text-center text-slate-400">
+            {isLogin 
+              ? "Enter your credentials to access your account." 
+              : "Create an account to save your solver progress."}
+          </DialogDescription>
         </DialogHeader>
+        
         <form onSubmit={handleSubmit} className="space-y-4 py-4">
-          {!isLogin && (
+           {!isLogin && (
             <div className="space-y-2">
               <Label>Full Name</Label>
               <Input className="bg-slate-800 border-slate-700" value={fullName} onChange={e => setFullName(e.target.value)} required />

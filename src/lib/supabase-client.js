@@ -11,4 +11,9 @@ const getEnvVar = (key, defaultValue) => {
 const supabaseUrl = getEnvVar('VITE_SUPABASE_URL', 'http://127.0.0.1:54321')
 const supabaseAnonKey = getEnvVar('VITE_SUPABASE_ANON_KEY')
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+// Prevent multiple instances during development HMR
+export const supabase = window.supabaseInstance || createClient(supabaseUrl, supabaseAnonKey)
+
+if (process.env.NODE_ENV !== 'production') {
+  window.supabaseInstance = supabase
+}

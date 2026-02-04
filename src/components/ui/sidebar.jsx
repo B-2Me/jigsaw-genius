@@ -8,7 +8,8 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
-import { Sheet, SheetContent } from "@/components/ui/sheet"
+// FIX: Added SheetTitle to imports
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Tooltip,
@@ -168,6 +169,8 @@ const Sidebar = React.forwardRef((
             }
           }
           side={side}>
+          {/* FIX: Added mandatory Title for accessibility (hidden visually) */}
+          <SheetTitle className="sr-only">Navigation Menu</SheetTitle>
           <div className="flex h-full w-full flex-col">{children}</div>
         </SheetContent>
       </Sheet>)
@@ -216,6 +219,8 @@ const Sidebar = React.forwardRef((
 })
 Sidebar.displayName = "Sidebar"
 
+// ... (Rest of the file remains unchanged: SidebarTrigger, SidebarRail, etc.)
+// Re-export all the components as before
 const SidebarTrigger = React.forwardRef(({ className, onClick, asChild = false, ...props }, ref) => {
   const { toggleSidebar } = useSidebar()
 
