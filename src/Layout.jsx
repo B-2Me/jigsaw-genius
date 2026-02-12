@@ -16,7 +16,6 @@ import { SolverProvider } from "@/components/puzzle/SolverContext";
 import { useAuth } from "@/lib/AuthContext";
 import { Button } from "@/components/ui/button";
 import AuthModal from "@/components/ui/auth-modal";
-import NavigationTracker from "@/lib/NavigationTracker";
 
 export default function Layout({ children }) {
   const { user, logout, setIsAuthModalOpen, isAuthenticated } = useAuth();
@@ -31,7 +30,6 @@ export default function Layout({ children }) {
   return (
     <SolverProvider>
       <SidebarProvider>
-        <NavigationTracker />
         <AuthModal />
         
         <div className="min-h-screen flex w-full bg-slate-950">
@@ -197,7 +195,7 @@ function SidebarTriggerWithLogic() {
   if ((!isMobile && open) || (isMobile && openMobile)) return null;
 
   return (
-    <div className="fixed top-3 left-4 z-[9999]">
+    <div className="fixed top-3 left-4 z-40">
       <SidebarTrigger className="bg-slate-900 border border-indigo-500/30 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.3)] hover:text-white hover:bg-indigo-600 hover:border-indigo-500 transition-all duration-300" />
     </div>
   );

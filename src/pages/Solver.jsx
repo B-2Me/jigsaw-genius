@@ -131,8 +131,10 @@ export default function SolverPage() {
                   {globalRuns.toLocaleString()}
                 </span>
               </div>
-              <span className="text-[10px] text-slate-500 mt-1 uppercase tracking-wider">
-                Live Updates
+              <span className="text-[10px] text-slate-500 mt-1 tracking-wider">
+              <div className="text-[10px] text-slate-500 mt-1 flex items-center justify-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Updates every 10 seconds
+              </div>
               </span>
             </div>
           </div>
@@ -145,14 +147,6 @@ export default function SolverPage() {
           onReset={handleReset}
           currentStats={stats}
         />
-        
-        <Alert className="bg-blue-900/20 border-blue-500/30 text-blue-200">
-            <Info className="h-4 w-4 text-blue-400" />
-            <AlertTitle>Current Placement Strategy</AlertTitle>
-            <AlertDescription>
-              {alertDescription}
-            </AlertDescription>
-        </Alert>
 
         <PuzzleBoard
           board={board}

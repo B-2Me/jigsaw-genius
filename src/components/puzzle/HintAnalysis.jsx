@@ -140,7 +140,6 @@ export default function HintAnalysis() {
           This shows the highest-performing piece and its specific rotation for each position next to a fixed hint. 
           {getAnalysisDescription()}
         </p>
-
         {Object.entries(hints).map(([position, hintData]) => {
           const hintPiece = pieces ? pieces.find(p => p.id === hintData.id) : null;
           const bestNorth = getBestPieceForAdjacency(position, 'north');
@@ -149,7 +148,7 @@ export default function HintAnalysis() {
           const bestWest = getBestPieceForAdjacency(position, 'west');
 
           return (
-            <div key={position} className="mb-10 last:mb-0 p-4 border border-slate-800 rounded-xl overflow-x-auto">
+            <div key={position} className="mb-6 last:mb-0 p-4 border border-slate-800 rounded-xl overflow-x-auto bg-slate-950/30">
               <div className="flex flex-wrap items-center gap-4 mb-6">
                 <Badge className="bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
                   Hint at Position {position}
@@ -174,7 +173,6 @@ export default function HintAnalysis() {
                     </div>
 
                     {/* Center - Hint Piece - Row 2, Col 2 */}
-                    {/* MODIFIED: Removed 'items-center' to allow top alignment, added 'h-full' to fill grid cell height */}
                     <div className="col-start-2 row-start-2 bg-yellow-500/10 rounded-lg p-2 md:p-4 border border-yellow-500/30 min-w-[100px] md:min-w-[140px] w-full h-full">
                       <div>
                         <div className="text-[10px] md:text-xs text-yellow-400 mb-2 uppercase tracking-wide text-center">

@@ -1,5 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
+import { useSolver } from './SolverContext';
 
 const EDGE_COLORS = {
   0: '#1e293b',  // slate-800 (border/empty)
@@ -27,7 +28,10 @@ const EDGE_COLORS = {
   22: '#0891b2'  // cyan-600
 };
 
-export default function PuzzleBoard({ board, hints, currentRun, isRunning }) {
+export default function PuzzleBoard({ board, hints, currentRun, isRunning, barrierMap }) {
+  const solver = useSolver();
+  const activeBarrierMap = barrierMap || (solver?.showBarrierMap ? solver.failCounts : null);
+
   const SIZE = 16;
 
   const getPieceColor = (piece, position) => {
@@ -67,6 +71,17 @@ export default function PuzzleBoard({ board, hints, currentRun, isRunning }) {
         />
       </div>
     );
+  };
+
+  // Calculate max once per render, not for every cell
+  const maxFailures = activeBarrierMap ? Math.max(...Object.values(activeBarrierMap)) : 0;
+
+  const getBarrierMapStyle = (position) => {
+      if (!activeBarrierMap || !activeBarrierMap[position] || maxFailures === 0) return {};
+      
+      const intensity = Math.min(1, activeBarrierMap[position] / maxFailures);
+      // Red overlay with opacity based on failure count
+      return { backgroundColor: `rgba(239, 68, 68, ${intensity * 0.8})` };
   };
 
   return (
@@ -135,6 +150,12 @@ export default function PuzzleBoard({ board, hints, currentRun, isRunning }) {
                     <div className="absolute -top-1 -right-1 w-3 h-3 bg-yellow-400 rounded-full border-2 border-slate-900 shadow-lg">
                       <div className="w-full h-full bg-yellow-300 rounded-full animate-pulse" />
                     </div>
+                  )}
+
+                  {activeBarrierMap && activeBarrierMap[position] > 0 && (
+                      <div className="absolute inset-0 z-10 pointer-events-none rounded-sm" style={getBarrierMapStyle(position)}>
+                          <span className="absolute bottom-0 right-0 text-[6px] text-white font-bold p-0.5">{activeBarrierMap[position]}</span>
+                      </div>
                   )}
                 </motion.div>
               );

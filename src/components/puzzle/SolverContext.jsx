@@ -1,6 +1,7 @@
 import React, { createContext, useState, useEffect, useCallback, useContext, useRef } from 'react';
 import { base44 } from '@/api/base44Client';
 import { supabase } from '@/lib/supabase-client';
+import { getItem, setItem, removeItem } from '@/lib/indexedDB';
 
 // --- Data Constants ---
 const pieces = [
@@ -109,10 +110,13 @@ const SIZE = 16;
 const pieceMap = Object.fromEntries(pieces.map(p => [p.id, p]));
 const directions = { north: -SIZE, east: 1, south: SIZE, west: -1 };
 
-const hintAdjacentPositions = new Set();
+const hintAdjacentStatsKeys = new Array(SIZE * SIZE).fill(null);
+for (let i = 0; i < SIZE * SIZE; i++) {
+    hintAdjacentStatsKeys[i] = i.toString();
+}
 Object.keys(hints).forEach(hintPosStr => {
     const hintPos = parseInt(hintPosStr);
-    Object.values(directions).forEach(offset => {
+    Object.entries(directions).forEach(([dirName, offset]) => {
         const adjPos = hintPos + offset;
         const row = Math.floor(adjPos / SIZE);
         const col = adjPos % SIZE;
@@ -120,44 +124,159 @@ Object.keys(hints).forEach(hintPosStr => {
             !(offset === directions.east && col === 0) &&
             !(offset === directions.west && col === SIZE - 1))
         {
-            hintAdjacentPositions.add(adjPos);
+            hintAdjacentStatsKeys[adjPos] = `${hintPos}-${dirName}`;
         }
     });
 });
 
-const getInitialState = (key, defaultValue) => {
-    try {
-        const item = window.localStorage.getItem(key);
-        return item ? JSON.parse(item) : defaultValue;
-    } catch (error) {
-        console.warn(`Error reading localStorage key "${key}":`, error);
-        return defaultValue;
-    }
-};
+// --- OPTIMIZATION: Precompute Rotations ---
+// Avoids creating new arrays/objects during the hot loop
+// Also build a Lookup Table for fast candidate selection
+const PRECOMPUTED_PIECES = new Array(256).fill(null);
+const PIECE_LOOKUP = Array.from({ length: 23 }, () => [[], [], [], []]); // [color][direction] -> [rotData...]
+const ALL_ROTATIONS = [];
+
+pieces.forEach(p => {
+    const rotations = [0, 90, 180, 270].map(rot => {
+        const steps = Math.round(rot / 90) % 4;
+        const edges = steps === 0 
+            ? [...p.edges] 
+            : [...p.edges.slice(4 - steps), ...p.edges.slice(0, 4 - steps)];
+        return { piece: p, edges, rotation: rot, attemptKey: `${p.id}-${rot}` };
+    });
+
+    PRECOMPUTED_PIECES[p.id] = {
+        id: p.id,
+        rotations: rotations
+    };
+
+    rotations.forEach(rotData => {
+        ALL_ROTATIONS.push(rotData);
+        // Index by edge color for each direction: 0=N, 1=E, 2=S, 3=W
+        PIECE_LOOKUP[rotData.edges[0]][0].push(rotData);
+        PIECE_LOOKUP[rotData.edges[1]][1].push(rotData);
+        PIECE_LOOKUP[rotData.edges[2]][2].push(rotData);
+        PIECE_LOOKUP[rotData.edges[3]][3].push(rotData);
+    });
+});
 
 const SolverContext = createContext();
 export const useSolver = () => useContext(SolverContext);
+
+const analyzeFailure = (board, used, pos) => {
+    const row = Math.floor(pos / SIZE);
+    const col = pos % SIZE;
+    let reqTop = -1, reqRight = -1, reqBottom = -1, reqLeft = -1;
+
+    // Border constraints
+    if (row === 0) reqTop = 0;
+    if (row === SIZE - 1) reqBottom = 0;
+    if (col === 0) reqLeft = 0;
+    if (col === SIZE - 1) reqRight = 0;
+
+    // Neighbor constraints
+    if (row > 0) { const n = board[pos - SIZE]; if (n) reqTop = n.edges[2]; }
+    if (col < SIZE - 1) { const n = board[pos + 1]; if (n) reqRight = n.edges[3]; }
+    if (row < SIZE - 1) { const n = board[pos + SIZE]; if (n) reqBottom = n.edges[0]; }
+    if (col > 0) { const n = board[pos - 1]; if (n) reqLeft = n.edges[1]; }
+
+    let possiblePieces = 0;
+    let availablePieces = 0;
+    
+    for (let id = 0; id < 256; id++) {
+         const precomputed = PRECOMPUTED_PIECES[id];
+         for (const rotData of precomputed.rotations) {
+             if (reqTop !== -1) { if (rotData.edges[0] !== reqTop) continue; }
+             else if (rotData.edges[0] === 0) continue;
+             
+             if (reqRight !== -1) { if (rotData.edges[1] !== reqRight) continue; }
+             else if (rotData.edges[1] === 0) continue;
+
+             if (reqBottom !== -1) { if (rotData.edges[2] !== reqBottom) continue; }
+             else if (rotData.edges[2] === 0) continue;
+
+             if (reqLeft !== -1) { if (rotData.edges[3] !== reqLeft) continue; }
+             else if (rotData.edges[3] === 0) continue;
+
+             possiblePieces++;
+             if (used[id] === 0) availablePieces++;
+         }
+    }
+    return { possiblePieces, availablePieces, constraints: { 
+        t: reqTop === -1 ? '*' : reqTop, 
+        r: reqRight === -1 ? '*' : reqRight, 
+        b: reqBottom === -1 ? '*' : reqBottom, 
+        l: reqLeft === -1 ? '*' : reqLeft 
+    } };
+};
 
 export const SolverProvider = ({ children }) => {
   const [board, setBoard] = useState(Array(SIZE * SIZE).fill(null));
   const [isRunning, setIsRunning] = useState(false);
   const [onlineCount, setOnlineCount] = useState(0); 
   
-  const [currentRun, setCurrentRun] = useState(() => getInitialState('solver-currentRun', { run: 0, score: 0 }));
-  const [stats, setStats] = useState(() => getInitialState('solver-stats', {
-    totalRuns: 0, bestScore: 0, avgScore: 0, completedSolutions: 0
-  }));
-  const [hintAdjacencyStats, setHintAdjacencyStats] = useState(() => getInitialState('solver-hintAdjacencyStats', {}));
-  const [globalScoreDistribution, setGlobalScoreDistribution] = useState(() => getInitialState('solver-globalScoreDistribution', {}));
-  const [placementAttemptCounts, setPlacementAttemptCounts] = useState(() => getInitialState('solver-placementAttemptCounts', {}));
-  const [mlParams, setMlParams] = useState(() => getInitialState('solver-mlParams', {
+  // Initialize with defaults, load from DB in useEffect
+  const [currentRun, setCurrentRun] = useState({ run: 0, score: 0 });
+  const [stats, setStats] = useState({ totalRuns: 0, bestScore: 0, avgScore: 0, completedSolutions: 0 });
+  const [hintAdjacencyStats, setHintAdjacencyStats] = useState({});
+  const [globalScoreDistribution, setGlobalScoreDistribution] = useState({});
+  const [placementAttemptCounts, setPlacementAttemptCounts] = useState({});
+  const [solutions, setSolutions] = useState([]);
+  const [failCounts, setFailCounts] = useState({});
+  
+  const [recentStats, setRecentStats] = useState({ avg: 0, min: 0, max: 0, history: [] });
+  const recentScoresBufferRef = useRef(new Uint16Array(1000));
+  const recentScoresIndexRef = useRef(0);
+  const recentScoresSumRef = useRef(0);
+  const recentScoresCountRef = useRef(0);
+  const [showBarrierMap, setShowBarrierMap] = useState(false);
+  const [validationStatus, setValidationStatus] = useState(null);
+  const [bestBoards, setBestBoards] = useState([]);
+  const [actualIps, setActualIps] = useState(0);
+  const runsLastSecondRef = useRef(0);
+  const lastIpsUpdateRef = useRef(Date.now());
+  
+  // PERFORMANCE: Use Refs for high-frequency data accumulation to avoid React render cycle overhead in the hot loop
+  const hintAdjacencyStatsRef = useRef(hintAdjacencyStats);
+  const globalScoreDistributionRef = useRef(globalScoreDistribution);
+  const placementAttemptCountsRef = useRef(placementAttemptCounts);
+  const failCountsRef = useRef(failCounts);
+  
+  // PERFORMANCE: Mutable buffers for the solver loop to avoid Garbage Collection
+  const workingBoardRef = useRef(Array(SIZE * SIZE).fill(null));
+  const usedPiecesRef = useRef(new Uint8Array(256)); // 0 = unused, 1 = used
+  const currentRunRef = useRef(currentRun);
+  const statsRef = useRef(stats);
+  const failCountsBufferRef = useRef(new Uint32Array(256)); // Fast counter for current batch
+  const weightsBufferRef = useRef(new Float32Array(1024));
+
+  const hasLoggedSaveErrorRef = useRef(false);
+  const [mlParams, setMlParams] = useState({
     useCalibration: true,
-    boardUpdateFrequency: 100,
-    iterationsPerSecond: 10000
-  }));
+    boardUpdateFrequency: 2000,
+    iterationsPerSecond: 10000,
+    turboMode: false
+  });
 
   const pendingGlobalRunsRef = useRef(0);
   const globalStatsIdRef = useRef(null);
+
+  // --- Validation: Check fixed_order integrity on mount ---
+  useEffect(() => {
+    const uniquePositions = new Set(fixed_order);
+    const missingPositions = [];
+    for (let i = 0; i < SIZE * SIZE; i++) {
+      if (!uniquePositions.has(i)) missingPositions.push(i);
+    }
+    
+    if (missingPositions.length > 0) {
+      console.error(`[Solver] CRITICAL: fixed_order is missing ${missingPositions.length} positions!`, missingPositions);
+      setValidationStatus({ valid: false, message: `Error: Missing ${missingPositions.length} positions` });
+    } else {
+      // console.log(`[Solver] fixed_order validated: All ${uniquePositions.size} positions present.`);
+      setValidationStatus({ valid: true, message: "Logic Validated" });
+    }
+  }, []);
 
   // --- 1. Real-time Presence Logic (Fixes "0 Online") ---
   useEffect(() => {
@@ -181,15 +300,111 @@ export const SolverProvider = ({ children }) => {
     };
   }, []);
 
-  // --- 2. Persist Local State ---
+  // --- 1b. Load State from IndexedDB (with LocalStorage migration) ---
   useEffect(() => {
-    localStorage.setItem('solver-currentRun', JSON.stringify(currentRun));
-    localStorage.setItem('solver-stats', JSON.stringify(stats));
-    localStorage.setItem('solver-hintAdjacencyStats', JSON.stringify(hintAdjacencyStats));
-    localStorage.setItem('solver-globalScoreDistribution', JSON.stringify(globalScoreDistribution));
-    localStorage.setItem('solver-placementAttemptCounts', JSON.stringify(placementAttemptCounts));
-    localStorage.setItem('solver-mlParams', JSON.stringify(mlParams));
-  }, [currentRun, stats, hintAdjacencyStats, globalScoreDistribution, placementAttemptCounts, mlParams]);
+    const loadData = async () => {
+        const loadKey = async (key, setter, ref, defaultVal) => {
+            let val = await getItem(key);
+            
+            // Migration: If not in DB, check LocalStorage
+            if (!val) {
+                try {
+                    const local = window.localStorage.getItem(key);
+                    if (local) {
+                        val = JSON.parse(local);
+                        // Save to DB immediately to complete migration
+                        await setItem(key, val);
+                        // Optional: Clear local storage to free up space
+                        window.localStorage.removeItem(key);
+                    }
+                } catch (e) {
+                    console.warn(`Migration failed for ${key}`, e);
+                }
+            }
+
+            const finalVal = val || defaultVal;
+            setter(finalVal);
+            if (ref) ref.current = finalVal;
+            return finalVal;
+        };
+
+        await loadKey('solver-currentRun', setCurrentRun, currentRunRef, { run: 0, score: 0 });
+        await loadKey('solver-stats', setStats, statsRef, { totalRuns: 0, bestScore: 0, avgScore: 0, completedSolutions: 0 });
+        await loadKey('solver-hintAdjacencyStats', setHintAdjacencyStats, hintAdjacencyStatsRef, {});
+        await loadKey('solver-globalScoreDistribution', setGlobalScoreDistribution, globalScoreDistributionRef, {});
+        await loadKey('solver-placementAttemptCounts', setPlacementAttemptCounts, placementAttemptCountsRef, {});
+        await loadKey('solver-failCounts', setFailCounts, failCountsRef, {});
+        await loadKey('solver-solutions', setSolutions, null, []);
+        await loadKey('solver-mlParams', setMlParams, null, { 
+            useCalibration: true, 
+            boardUpdateFrequency: 2000, 
+            iterationsPerSecond: 10000, 
+            turboMode: false 
+        });
+
+        // Special handling for bestBoards (filtering)
+        let bb = await getItem('solver-bestBoards');
+        if (!bb) {
+            const local = window.localStorage.getItem('solver-bestBoards');
+            if (local) bb = JSON.parse(local);
+        }
+        if (Array.isArray(bb) && bb.length > 0) {
+            const scores = bb.map(b => b.filter(p => p).length);
+            const maxScore = Math.max(...scores);
+            const filtered = bb.filter((_, i) => scores[i] === maxScore);
+            setBestBoards(filtered);
+        }
+    };
+    loadData();
+  }, []);
+
+  // --- 2. Persist Local State (Interval) ---
+  // FIX: Use an interval to save Refs directly. The previous debounced useEffect 
+  // would reset constantly during high-speed runs and never actually save until stopped.
+  useEffect(() => {
+    const saveInterval = setInterval(() => {
+      try {
+        // Use setItem from IndexedDB (async, no JSON.stringify needed for objects)
+        setItem('solver-currentRun', currentRunRef.current);
+        setItem('solver-stats', statsRef.current);
+        setItem('solver-hintAdjacencyStats', hintAdjacencyStatsRef.current);
+        setItem('solver-globalScoreDistribution', globalScoreDistributionRef.current);
+        setItem('solver-placementAttemptCounts', placementAttemptCountsRef.current);
+        setItem('solver-mlParams', mlParams);
+        setItem('solver-failCounts', failCountsRef.current);
+        hasLoggedSaveErrorRef.current = false; // Reset flag on success
+      } catch (e) {
+        if (!hasLoggedSaveErrorRef.current) {
+            console.warn("Failed to save solver state (likely quota exceeded). Suppressing further errors.", e);
+            hasLoggedSaveErrorRef.current = true;
+        }
+      }
+    }, 5000); // Save every 5 seconds (Optimized for larger IndexedDB payloads)
+    return () => clearInterval(saveInterval);
+  }, [mlParams]); // mlParams dependency ensures we save latest config if it changes
+
+  // --- 2b. Persist Solutions (Separate Effect) ---
+  useEffect(() => {
+      setItem('solver-solutions', solutions);
+  }, [solutions]);
+
+  // --- 2c. Persist Best Boards ---
+  useEffect(() => {
+      if (bestBoards && bestBoards.length > 0) {
+          setItem('solver-bestBoards', bestBoards);
+      }
+  }, [bestBoards]);
+
+  // --- 2d. Sync Stats with Best Boards (Safety Net) ---
+  useEffect(() => {
+      if (bestBoards.length > 0) {
+          const currentBestBoardScore = bestBoards[0].filter(p => p).length;
+          if (currentBestBoardScore > stats.bestScore) {
+              setStats(prev => ({ ...prev, bestScore: currentBestBoardScore }));
+              statsRef.current.bestScore = currentBestBoardScore;
+          }
+      }
+  }, [bestBoards, stats.bestScore]);
 
   // --- 3. Dynamic Global Stats Sync (Fixes "Total Global Runs") ---
   useEffect(() => {
@@ -229,56 +444,35 @@ export const SolverProvider = ({ children }) => {
     return () => clearInterval(interval);
   }, []);
 
-  const rotate = (edges, rot) => {
-    const steps = Math.round(rot / 90) % 4;
-    if (steps === 0) return [...edges];
-    return [...edges.slice(4 - steps), ...edges.slice(0, 4 - steps)];
-  };
-  
-  const fits = (currentBoard, pos, pieceEdges) => {
-    const row = Math.floor(pos / SIZE);
-    const col = pos % SIZE;
-
-    if ((row === 0) !== (pieceEdges[0] === 0)) return false;
-    if ((col === SIZE - 1) !== (pieceEdges[1] === 0)) return false;
-    if ((row === SIZE - 1) !== (pieceEdges[2] === 0)) return false;
-    if ((col === 0) !== (pieceEdges[3] === 0)) return false;
-
-    if (row > 0) {
-      const neighbor = currentBoard[pos + directions.north];
-      if (neighbor && neighbor.edges[2] !== pieceEdges[0]) {
-        return false;
-      }
+  const runBatch = useCallback(() => {
+    try {
+    // Determine batch size based on target FPS (e.g., 60fps)
+    // If we want 10,000 runs/sec, we need ~166 runs per 16ms tick.
+    const ips = mlParams.iterationsPerSecond || 10000;
+    const batchSize = Math.max(1, Math.ceil(ips / 60));
+    
+    let solutionFound = false;
+    let triggerBoardUpdate = false;
+    let batchBestBoards = [];
+    let newHighScoreReached = false;
+    let runsInBatch = 0;
+    const validPlacementsBuffer = []; // Hoist allocation out of the loop
+    const batchFailCounts = failCountsBufferRef.current;
+    let firstFailure = true;
+    
+    for (let i = 0; i < batchSize; i++) {
+        const shouldStop = runSingleSimulation();
+        runsInBatch++;
+        if (shouldStop) break;
     }
 
-    if (col < SIZE - 1) {
-      const neighbor = currentBoard[pos + directions.east];
-      if (neighbor && neighbor.edges[3] !== pieceEdges[1]) {
-        return false;
-      }
-    }
-
-    if (row < SIZE - 1) {
-      const neighbor = currentBoard[pos + directions.south];
-      if (neighbor && neighbor.edges[0] !== pieceEdges[2]) {
-        return false;
-      }
-    }
-
-    if (col > 0) {
-      const neighbor = currentBoard[pos + directions.west];
-      if (neighbor && neighbor.edges[1] !== pieceEdges[3]) {
-        return false;
-      }
-    }
-
-    return true;
-  };
-
-  const runSingleLayout = useCallback(() => {
-    const newBoard = Array(SIZE * SIZE).fill(null);
-    let pool = [...pieces];
-    const used_ids = new Set();
+    function runSingleSimulation() {
+    const newBoard = workingBoardRef.current;
+    newBoard.fill(null); // Reset buffer
+    
+    const used = usedPiecesRef.current;
+    used.fill(0); // Reset used flags
+    firstFailure = true; // Reset failure tracker for this simulation
 
     for (const [posStr, hint] of Object.entries(hints)) {
         const pos = parseInt(posStr);
@@ -286,101 +480,171 @@ export const SolverProvider = ({ children }) => {
         if (piece) {
             newBoard[pos] = {
                 id: piece.id,
-                edges: rotate(piece.edges, hint.rotation),
+                edges: PRECOMPUTED_PIECES[piece.id].rotations.find(r => r.rotation === hint.rotation).edges,
                 rotation: hint.rotation,
                 isHint: true,
             };
-            used_ids.add(piece.id);
+            used[piece.id] = 1;
         }
     }
     
-    pool = pool.filter(p => !used_ids.has(p.id));
-
     for (const pos of fixed_order) {
       if (newBoard[pos] !== null) continue;
       
-      const validPlacements = [];
+      validPlacementsBuffer.length = 0; // Reset buffer
 
-      for (const piece of pool) {
-          for (const rotation of [0, 90, 180, 270]) {
-              const rotatedEdges = rotate(piece.edges, rotation);
-              if (fits(newBoard, pos, rotatedEdges)) {
-                  validPlacements.push({
-                      piece: piece,
-                      rotation: rotation,
-                      edges: rotatedEdges,
-                  });
-              }
-          }
+      // OPTIMIZATION: Use Lookup Table to find candidates instead of iterating all 256 pieces
+      const row = Math.floor(pos / SIZE);
+      const col = pos % SIZE;
+
+      // Determine constraints for this position
+      // -1 means "no specific color constraint" (but still might need to be non-zero)
+      let reqTop = -1, reqRight = -1, reqBottom = -1, reqLeft = -1;
+
+      // 1. Border Constraints
+      if (row === 0) reqTop = 0;
+      if (row === SIZE - 1) reqBottom = 0;
+      if (col === 0) reqLeft = 0;
+      if (col === SIZE - 1) reqRight = 0;
+
+      // 2. Neighbor Constraints (override/augment border checks)
+      if (row > 0) {
+          const n = newBoard[pos - SIZE]; // North
+          if (n) reqTop = n.edges[2]; // Match North's Bottom
+      }
+      if (col < SIZE - 1) {
+          const n = newBoard[pos + 1]; // East
+          if (n) reqRight = n.edges[3]; // Match East's Left
+      }
+      if (row < SIZE - 1) {
+          const n = newBoard[pos + SIZE]; // South
+          if (n) reqBottom = n.edges[0]; // Match South's Top
+      }
+      if (col > 0) {
+          const n = newBoard[pos - 1]; // West
+          if (n) reqLeft = n.edges[1]; // Match West's Right
       }
 
-      if (validPlacements.length > 0) {
+      // 3. Select Candidate Source
+      // Pick the most restrictive constraint to iterate over
+      let candidates = ALL_ROTATIONS;
+      if (reqTop !== -1) candidates = PIECE_LOOKUP[reqTop][0];
+      else if (reqLeft !== -1) candidates = PIECE_LOOKUP[reqLeft][3];
+      else if (reqRight !== -1) candidates = PIECE_LOOKUP[reqRight][1];
+      else if (reqBottom !== -1) candidates = PIECE_LOOKUP[reqBottom][2];
+
+      // 4. Filter Candidates
+      for (const rotData of candidates) {
+          if (used[rotData.piece.id] === 1) continue;
+
+          // Check against all constraints
+          // Note: We check !== -1 to see if a constraint exists. 
+          // If constraint is 0 (border), edges must be 0. 
+          // If constraint is > 0 (neighbor), edges must match.
+          // If constraint is -1 (internal/unknown), edges must NOT be 0 (internal edges are never flat).
+          
+          if (reqTop !== -1) { if (rotData.edges[0] !== reqTop) continue; } 
+          else if (rotData.edges[0] === 0) continue; // Internal edge cannot be flat
+
+          if (reqRight !== -1) { if (rotData.edges[1] !== reqRight) continue; }
+          else if (rotData.edges[1] === 0) continue;
+
+          if (reqBottom !== -1) { if (rotData.edges[2] !== reqBottom) continue; }
+          else if (rotData.edges[2] === 0) continue;
+
+          if (reqLeft !== -1) { if (rotData.edges[3] !== reqLeft) continue; }
+          else if (rotData.edges[3] === 0) continue;
+
+          validPlacementsBuffer.push(rotData);
+      }
+
+      if (validPlacementsBuffer.length > 0) {
           let chosenPlacement;
 
           const isCalibrationMode = mlParams.useCalibration;
           const isMlActive = !mlParams.useCalibration;
+          const statsKey = hintAdjacentStatsKeys[pos];
           
-          if (hintAdjacentPositions.has(pos) && isCalibrationMode) {
-              const statsKey = Object.keys(hints).map(hPos => 
-                  Object.keys(directions).map(dir => ({ pos: parseInt(hPos) + directions[dir], key: `${hPos}-${dir}`}))
-              ).flat().find(item => item.pos === pos)?.key;
+          // Only use expensive calibration (fairness) for hint-adjacent positions (legacy keys)
+          // For the rest of the board, random selection is sufficient for data collection.
+          if (statsKey && isCalibrationMode && statsKey.includes('-')) {
+              let minAttempts = Infinity;
+              const currentCounts = placementAttemptCountsRef.current;
+              const countsObj = currentCounts[statsKey] || {};
+
+              // Pass 1: Find min attempts (Zero allocation)
+              for (let i = 0; i < validPlacementsBuffer.length; i++) {
+                  const p = validPlacementsBuffer[i];
+                  const attemptKey = p.attemptKey;
+                  const attempts = countsObj[attemptKey] || 0;
+                  if (attempts < minAttempts) minAttempts = attempts;
+              }
+
+              // Pass 2: Reservoir sampling to pick one of the min attempts (Zero allocation)
+              let count = 0;
+              for (let i = 0; i < validPlacementsBuffer.length; i++) {
+                  const p = validPlacementsBuffer[i];
+                  const attemptKey = p.attemptKey;
+                  const attempts = countsObj[attemptKey] || 0;
+                  if (attempts === minAttempts) {
+                      count++;
+                      if (Math.random() < 1/count) chosenPlacement = p;
+                  }
+              }
               
-              if (statsKey) {
-                  let minAttempts = Infinity;
-                  const placementsWithCounts = validPlacements.map(p => {
-                      const attemptKey = `${p.piece.id}-${p.rotation}`;
-                      const attempts = placementAttemptCounts[statsKey]?.[attemptKey] || 0;
-                      minAttempts = Math.min(minAttempts, attempts);
-                      return { placement: p, attempts, attemptKey };
-                  });
-                  
-                  const minAttemptPlacements = placementsWithCounts.filter(p => p.attempts === minAttempts);
-                  const chosen = minAttemptPlacements[Math.floor(Math.random() * minAttemptPlacements.length)];
-                  chosenPlacement = chosen.placement;
-                  
-                  setPlacementAttemptCounts(prev => {
-                      const newCounts = JSON.parse(JSON.stringify(prev));
-                      if (!newCounts[statsKey]) newCounts[statsKey] = {};
-                      newCounts[statsKey][chosen.attemptKey] = (newCounts[statsKey][chosen.attemptKey] || 0) + 1;
-                      return newCounts;
-                  });
+              // Update counts
+              if (!currentCounts[statsKey]) currentCounts[statsKey] = {};
+              const chosenKey = chosenPlacement.attemptKey;
+              currentCounts[statsKey][chosenKey] = (currentCounts[statsKey][chosenKey] || 0) + 1;
+
+          } else if (statsKey && isMlActive) { 
+              const currentStats = hintAdjacencyStatsRef.current;
+              const pieceStats = currentStats[statsKey];
+              
+              // OPTIMIZATION: If no stats exist for this position yet, skip expensive weighting
+              if (!pieceStats) {
+                  chosenPlacement = validPlacementsBuffer[Math.floor(Math.random() * validPlacementsBuffer.length)];
               } else {
-                  chosenPlacement = validPlacements[Math.floor(Math.random() * validPlacements.length)];
-              }
-          
-          } else if (hintAdjacentPositions.has(pos) && isMlActive) { 
-              const weightedOptions = [];
-              let totalWeight = 0;
+                  let totalWeight = 0;
+                  const weights = weightsBufferRef.current;
+                  let minWeight = Infinity;
 
-              for (const p of validPlacements) {
-                  const pieceId = p.piece.id;
-                  const rotation = p.rotation;
-                  let weight = 1.0;
-
-                  const statsKey = Object.keys(hints).map(hPos => 
-                      Object.keys(directions).map(dir => ({ pos: parseInt(hPos) + directions[dir], key: `${hPos}-${dir}`}))
-                  ).flat().find(item => item.pos === pos)?.key;
-                  
-                  if (statsKey && hintAdjacencyStats[statsKey]?.[pieceId]?.[rotation]) {
-                      weight = hintAdjacencyStats[statsKey][pieceId][rotation].weighted_avg_contribution || 1.0;
+                  // Pass 1: Calculate raw weights and find minimum
+                  for (let i = 0; i < validPlacementsBuffer.length; i++) {
+                      const p = validPlacementsBuffer[i];
+                      let rawVal = 0;
+                      if (pieceStats?.[p.piece.id]?.[p.rotation]) {
+                          rawVal = pieceStats[p.piece.id][p.rotation].weighted_avg_contribution || 0;
+                      }
+                      weights[i] = rawVal;
+                      if (rawVal < minWeight) minWeight = rawVal;
                   }
 
-                  weightedOptions.push({ placement: p, weight: weight });
-                  totalWeight += weight;
-              }
+                  // Pass 2: Normalize weights to be positive and sum them
+                  // We shift everything so the worst piece has a small positive weight (epsilon)
+                  const epsilon = 1.0; 
+                  const offset = (minWeight < 0) ? Math.abs(minWeight) + epsilon : epsilon;
 
-              let randomChoice = Math.random() * totalWeight;
-              for (const option of weightedOptions) {
-                  randomChoice -= option.weight;
-                  if (randomChoice <= 0) {
-                      chosenPlacement = option.placement;
-                      break;
+                  for (let i = 0; i < validPlacementsBuffer.length; i++) {
+                      const weight = weights[i] + offset;
+                      weights[i] = weight; // Store normalized weight
+                      totalWeight += weight;
                   }
+
+                  // Pass 3: Weighted random selection
+                  let randomChoice = Math.random() * totalWeight;
+                  for (let i = 0; i < validPlacementsBuffer.length; i++) {
+                      randomChoice -= weights[i];
+                      if (randomChoice <= 0) {
+                          chosenPlacement = validPlacementsBuffer[i];
+                          break;
+                      }
+                  }
+                  if (!chosenPlacement) chosenPlacement = validPlacementsBuffer[validPlacementsBuffer.length - 1];
               }
-              if (!chosenPlacement) chosenPlacement = weightedOptions[weightedOptions.length-1].placement;
           
           } else {
-            chosenPlacement = validPlacements[Math.floor(Math.random() * validPlacements.length)];
+            chosenPlacement = validPlacementsBuffer[Math.floor(Math.random() * validPlacementsBuffer.length)];
           }
           
           newBoard[pos] = {
@@ -389,120 +653,269 @@ export const SolverProvider = ({ children }) => {
               rotation: chosenPlacement.rotation,
           };
           
-          used_ids.add(chosenPlacement.piece.id);
-          pool = pool.filter(p => p.id !== chosenPlacement.piece.id);
+          used[chosenPlacement.piece.id] = 1;
+      } else {
+          // No valid placements found for this position.
+          // Only record the FIRST failure in the chain to visualize the "Barrier".
+          if (firstFailure) {
+              batchFailCounts[pos]++;
+              firstFailure = false;
+          }
       }
     }
     
     const score = newBoard.filter(p => p !== null).length;
+    const currentRunVal = currentRunRef.current;
+    const statsVal = statsRef.current;
+    const currentBest = statsVal.bestScore || 0;
+
+    const newRunCount = (currentRunVal.run || 0) + 1;
+    let stopBatch = false;
     
-    const shouldUpdateBoard = ((currentRun.run + 1) % mlParams.boardUpdateFrequency === 0) || (score === SIZE * SIZE);
-    if (shouldUpdateBoard) {
-        setBoard(newBoard);
+    // FIX: Check for solution, new best score, or update frequency
+    if (score === SIZE * SIZE) {
+        solutionFound = true;
+        triggerBoardUpdate = true;
+        stopBatch = true;
+    } else if (score > currentBest) {
+        // Found a new best score! Reset collection and snapshot.
+        
+        // DEBUG: Analyze why we stopped here
+        for (const pos of fixed_order) {
+            if (newBoard[pos] === null) {
+                const analysis = analyzeFailure(newBoard, used, pos);
+                console.log(`[Analysis] New Best ${score}. First failure at ${pos}. Constraints:`, analysis.constraints);
+                console.log(`[Analysis] Pieces fitting constraints: ${analysis.possiblePieces} total, ${analysis.availablePieces} available.`);
+                break;
+            }
+        }
+
+        newHighScoreReached = true;
+        batchBestBoards = [[...newBoard]];
+        triggerBoardUpdate = true;
+    } else if (score === currentBest && score > 0) {
+        // Found another board with the current best score. Collect it.
+        batchBestBoards.push([...newBoard]);
+        triggerBoardUpdate = true;
+    } else if (newRunCount % mlParams.boardUpdateFrequency === 0) {
+        triggerBoardUpdate = true;
     }
     
-    const newTotalRuns = (stats.totalRuns || 0) + 1;
-    const newAvgScore = (((stats.avgScore || 0) * (stats.totalRuns || 0)) + score) / newTotalRuns;
+    // Ensure numbers are treated as numbers to avoid string concatenation bugs.
+    // Also handle NaN if stats are corrupted.
+    const currentTotalRuns = parseInt(statsVal.totalRuns) || 0;
+    const currentAvgScore = parseFloat(statsVal.avgScore) || 0;
+    const newTotalRuns = currentTotalRuns + 1;
+    const newAvgScore = ((currentAvgScore * currentTotalRuns) + score) / newTotalRuns;
+
+    // Update Recent Stats (Last 1000 Runs)
+    const rIdx = recentScoresIndexRef.current;
+    if (recentScoresCountRef.current < 1000) {
+        recentScoresSumRef.current += score;
+        recentScoresCountRef.current++;
+    } else {
+        recentScoresSumRef.current = recentScoresSumRef.current - recentScoresBufferRef.current[rIdx] + score;
+    }
+    recentScoresBufferRef.current[rIdx] = score;
+    recentScoresIndexRef.current = (rIdx + 1) % 1000;
     
-    setCurrentRun({ run: (currentRun.run || 0) + 1, score });
-    setStats({
+    // Update Refs
+    currentRunRef.current = { run: newRunCount, score };
+    statsRef.current = {
         totalRuns: newTotalRuns,
-        bestScore: Math.max(stats.bestScore || 0, score),
+        bestScore: Math.max(statsVal.bestScore || 0, score),
         avgScore: newAvgScore,
-        completedSolutions: (stats.completedSolutions || 0) + (score === (SIZE * SIZE) ? 1 : 0)
-    });
+        completedSolutions: (statsVal.completedSolutions || 0) + (solutionFound ? 1 : 0)
+    };
 
     pendingGlobalRunsRef.current += 1;
 
-    setGlobalScoreDistribution(prevDist => {
-        const newDist = {...prevDist};
-        newDist[score] = (newDist[score] || 0) + 1;
-        return newDist;
-    });
+    // --- OPTIMIZED STATS UPDATE (Direct Mutation of Refs) ---
+    const currentGlobalDist = globalScoreDistributionRef.current;
+    currentGlobalDist[score] = (currentGlobalDist[score] || 0) + 1;
 
-    setHintAdjacencyStats(prevStats => {
-      const newStats = JSON.parse(JSON.stringify(prevStats));
-      const currentGlobalDist = {...globalScoreDistribution};
-      currentGlobalDist[score] = (currentGlobalDist[score] || 0) + 1;
-
-      let total_reliable_runs = 0;
-      let sum_reliable_scores = 0;
-      
-      for (const [scoreStr, count] of Object.entries(currentGlobalDist)) {
-        if (count >= 1000) {
-          const scoreValue = parseInt(scoreStr);
-          total_reliable_runs += count;
-          sum_reliable_scores += scoreValue * count;
-        }
+    let total_reliable_runs = 0;
+    let sum_reliable_scores = 0;
+    
+    // Calculate average from all data, not just >1000, to ensure we have a baseline
+    for (const [scoreStr, count] of Object.entries(currentGlobalDist)) {
+      // Lower threshold to 1 to include all runs, or keep a small buffer like 10
+      if (count >= 1) { 
+        const scoreValue = parseInt(scoreStr);
+        total_reliable_runs += count;
+        sum_reliable_scores += scoreValue * count;
       }
-      
-      const average_reliable_score = total_reliable_runs > 0 
-        ? sum_reliable_scores / total_reliable_runs 
-        : 0;
-      
-      let weighted_value = 0;
-      
-      if (currentGlobalDist[score] >= 1000) {
-        const rarity_multiplier = total_reliable_runs / currentGlobalDist[score];
-        weighted_value = (score - average_reliable_score) * rarity_multiplier;
-      }
-      
-      Object.keys(hints).forEach(hintPosStr => {
-        const hintPos = parseInt(hintPosStr);
-        Object.entries(directions).forEach(([dirName, offset]) => {
-          const adjPos = hintPos + offset;
-          const row = Math.floor(adjPos / SIZE);
-          const col = adjPos % SIZE;
-          if (adjPos >= 0 && adjPos < SIZE * SIZE &&
-              !(offset === directions.east && col === 0) &&
-              !(offset === directions.west && col === SIZE - 1)) {
+    }
+    
+    const average_reliable_score = total_reliable_runs > 0 
+      ? sum_reliable_scores / total_reliable_runs 
+      : 0;
+    
+    let weighted_value = 0;
+    
+    // FIX: Allow learning from rare high scores. 
+    // If a score is rare (low count), rarity_multiplier is high.
+    // We clamp the multiplier to avoid explosion on the very first run.
+    const scoreCount = currentGlobalDist[score] || 1;
+    const rarity_multiplier = Math.max(1, total_reliable_runs / scoreCount);
+    
+    // Only apply positive reinforcement if score is above average
+    // Or apply negative if below.
+    weighted_value = (score - average_reliable_score) * rarity_multiplier;
 
-              const adjacentPiece = newBoard[adjPos];
-              if (adjacentPiece && !adjacentPiece.isHint) {
-                const { id: pieceId, rotation } = adjacentPiece;
-                const key = `${hintPos}-${dirName}`;
-                
-                if (!newStats[key]) newStats[key] = {};
-                if (!newStats[key][pieceId]) newStats[key][pieceId] = {};
-                if (!newStats[key][pieceId][rotation]) {
-                  newStats[key][pieceId][rotation] = { 
+    const newStats = hintAdjacencyStatsRef.current; // Mutate Ref
+    
+    // Update stats for all placed pieces
+    for (let pos = 0; pos < SIZE * SIZE; pos++) {
+        const key = hintAdjacentStatsKeys[pos];
+        const piece = newBoard[pos];
+        
+        if (key && piece && !piece.isHint) {
+            const { id: pieceId, rotation } = piece;
+            
+            if (!newStats[key]) newStats[key] = {};
+            if (!newStats[key][pieceId]) newStats[key][pieceId] = {};
+            if (!newStats[key][pieceId][rotation]) {
+                newStats[key][pieceId][rotation] = { 
                     weighted_sum_of_scores: 0,
                     count: 0, 
                     scoreDistribution: {}
-                  };
-                }
-                
-                const currentPieceStats = newStats[key][pieceId][rotation];
-                currentPieceStats.count += 1;
-                
-                if (currentGlobalDist[score] >= 1000) {
-                  currentPieceStats.weighted_sum_of_scores += weighted_value;
-                  currentPieceStats.weighted_avg_contribution = currentPieceStats.weighted_sum_of_scores / currentPieceStats.count;
-                } else {
-                  currentPieceStats.weighted_avg_contribution = currentPieceStats.weighted_sum_of_scores / currentPieceStats.count;
-                }
-                
-                if (!currentPieceStats.scoreDistribution) {
-                  currentPieceStats.scoreDistribution = {};
-                }
-                const scoreKey = score.toString();
-                currentPieceStats.scoreDistribution[scoreKey] = (currentPieceStats.scoreDistribution[scoreKey] || 0) + 1;
-              }
-          }
+                };
+            }
+            
+            const currentPieceStats = newStats[key][pieceId][rotation];
+            currentPieceStats.count += 1;
+            
+            // Always update weighted sum
+            currentPieceStats.weighted_sum_of_scores += weighted_value;
+            currentPieceStats.weighted_avg_contribution = currentPieceStats.weighted_sum_of_scores / currentPieceStats.count;
+            
+            if (!currentPieceStats.scoreDistribution) {
+                currentPieceStats.scoreDistribution = {};
+            }
+            const scoreKey = score.toString();
+            currentPieceStats.scoreDistribution[scoreKey] = (currentPieceStats.scoreDistribution[scoreKey] || 0) + 1;
+        }
+    }
+
+    return stopBatch;
+    } // End runSingleSimulation
+
+    // Sync Refs to State for UI (once per batch)
+    setCurrentRun({...currentRunRef.current});
+    setStats({...statsRef.current});
+
+    if (solutionFound) {
+        setIsRunning(false);
+        setBoard(batchBestBoard);
+        setSolutions(prev => {
+            // Simple check to avoid duplicates if the exact same board is found
+            const newSolStr = JSON.stringify(batchBestBoard.map(p => p.id));
+            if (prev.some(s => JSON.stringify(s.board.map(p => p.id)) === newSolStr)) return prev;
+            return [...prev, { 
+                run: currentRunRef.current.run, 
+                date: new Date().toISOString(), 
+                board: batchBestBoard 
+            }];
         });
-      });
-      return newStats;
-    });
-  }, [stats, currentRun, hintAdjacencyStats, globalScoreDistribution, placementAttemptCounts, mlParams]);
+    } else if (batchBestBoards.length > 0) {
+        // Prioritize showing the latest best score found in this batch
+        setBoard(batchBestBoards[batchBestBoards.length - 1]);
+        
+        setBestBoards(prev => {
+            if (newHighScoreReached) {
+                return batchBestBoards;
+            }
+            
+            // Filter out any previous boards that have a lower score than what we just found.
+            // This handles cases where statsRef was out of sync with bestBoards (e.g. after import).
+            const batchScore = batchBestBoards[0].filter(p => p).length;
+            const validPrev = prev.filter(b => b.filter(p => p).length >= batchScore);
+
+            // Append to existing best boards, maybe limit to 50 to prevent memory issues
+            return [...validPrev, ...batchBestBoards].slice(-50);
+        });
+        setHintAdjacencyStats({...hintAdjacencyStatsRef.current});
+        setFailCounts({...failCountsRef.current}); // Sync fail counts on high score
+        setGlobalScoreDistribution({...globalScoreDistributionRef.current});
+        setPlacementAttemptCounts({...placementAttemptCountsRef.current});
+    } else if (triggerBoardUpdate) {
+        if (!mlParams.turboMode) {
+            setBoard([...workingBoardRef.current]);
+        }
+
+        setHintAdjacencyStats({...hintAdjacencyStatsRef.current});
+        setGlobalScoreDistribution({...globalScoreDistributionRef.current});
+        setPlacementAttemptCounts({...placementAttemptCountsRef.current});
+    }
+
+    // --- Track Actual IPS ---
+    runsLastSecondRef.current += runsInBatch;
+    const now = Date.now();
+    if (now - lastIpsUpdateRef.current >= 1000) {
+        setActualIps(Math.round(runsLastSecondRef.current * 1000 / (now - lastIpsUpdateRef.current)));
+        runsLastSecondRef.current = 0;
+        lastIpsUpdateRef.current = now;
+
+        // Sync fail counts from buffer to ref/state once per second to avoid UI thrashing
+        const currentFailCounts = failCountsRef.current;
+        let hasFailUpdates = false;
+        for(let i=0; i<256; i++) {
+            if (batchFailCounts[i] > 0) {
+                currentFailCounts[i] = (currentFailCounts[i] || 0) + batchFailCounts[i];
+                batchFailCounts[i] = 0; // Reset buffer
+                hasFailUpdates = true;
+            }
+        }
+        if (hasFailUpdates) setFailCounts({...currentFailCounts});
+        
+        // Update Recent Average State
+        const count = recentScoresCountRef.current;
+        if (count > 0) {
+            // Calculate Min/Max of the active buffer
+            let min = Infinity;
+            let max = -Infinity;
+            // Only iterate up to 'count' (max 1000)
+            const limit = Math.min(count, 1000);
+            for(let i = 0; i < limit; i++) {
+                const val = recentScoresBufferRef.current[i];
+                if (val < min) min = val;
+                if (val > max) max = val;
+            }
+
+            // Extract last 50 points for sparkline (handling circular buffer wrap)
+            const history = [];
+            let idx = recentScoresIndexRef.current - 1;
+            if (idx < 0) idx = 999;
+            
+            for(let i = 0; i < 50 && i < count; i++) {
+                history.unshift(recentScoresBufferRef.current[idx]);
+                idx = (idx - 1 + 1000) % 1000;
+            }
+
+            setRecentStats({
+                avg: recentScoresSumRef.current / count,
+                min,
+                max,
+                history
+            });
+        }
+    }
+    } catch (e) {
+        console.error('[Solver] Error in runBatch:', e);
+        setIsRunning(false);
+    }
+
+  }, [mlParams]);
   
   useEffect(() => {
     let interval;
     if (isRunning) {
-      const delay = Math.max(1, Math.floor(1000 / (mlParams.iterationsPerSecond || 30)));
-      interval = setInterval(runSingleLayout, delay);
+      // Run at 60 FPS (approx 16ms), but process multiple runs per tick inside runBatch
+      interval = setInterval(runBatch, 16);
     }
     return () => clearInterval(interval);
-  }, [isRunning, runSingleLayout, mlParams.iterationsPerSecond]);
+  }, [isRunning, runBatch]);
   
   const handleStart = () => setIsRunning(true);
   const handlePause = () => setIsRunning(false);
@@ -516,8 +929,9 @@ export const SolverProvider = ({ children }) => {
     const initialAttemptCounts = {};
     const initialMlParams = { 
       useCalibration: true, 
-      boardUpdateFrequency: 100,
-      iterationsPerSecond: 10000
+      boardUpdateFrequency: 2000,
+      iterationsPerSecond: 10000,
+      turboMode: false
     };
     
     setCurrentRun(initialRunState);
@@ -526,27 +940,77 @@ export const SolverProvider = ({ children }) => {
     setGlobalScoreDistribution(initialGlobalDist);
     setPlacementAttemptCounts(initialAttemptCounts);
     setMlParams(initialMlParams);
+    setBestBoards([]);
+    setFailCounts({});
     
-    localStorage.removeItem('solver-currentRun');
-    localStorage.removeItem('solver-stats');
-    localStorage.removeItem('solver-hintAdjacencyStats');
-    localStorage.removeItem('solver-globalScoreDistribution');
-    localStorage.removeItem('solver-placementAttemptCounts');
-    localStorage.removeItem('solver-mlParams');
+    // Reset Refs
+    currentRunRef.current = initialRunState;
+    statsRef.current = initialStatsState;
+    hintAdjacencyStatsRef.current = initialHintState;
+    globalScoreDistributionRef.current = initialGlobalDist;
+    placementAttemptCountsRef.current = initialAttemptCounts;
+    failCountsRef.current = {};
+    failCountsBufferRef.current.fill(0);
+    recentScoresBufferRef.current.fill(0);
+    recentScoresIndexRef.current = 0;
+    recentScoresSumRef.current = 0;
+    recentScoresCountRef.current = 0;
+    setRecentStats({ avg: 0, min: 0, max: 0, history: [] });
+    
+    removeItem('solver-currentRun');
+    removeItem('solver-stats');
+    removeItem('solver-hintAdjacencyStats');
+    removeItem('solver-globalScoreDistribution');
+    removeItem('solver-placementAttemptCounts');
+    removeItem('solver-mlParams');
+    removeItem('solver-bestBoards');
+    removeItem('solver-failCounts');
+  };
+
+  const handleKick = () => {
+      // "Kick" the solver by reducing confidence in current learned paths
+      // This forces it to re-explore alternatives while keeping some knowledge
+      const currentStats = hintAdjacencyStatsRef.current;
+      Object.values(currentStats).forEach(pieceStats => {
+          Object.values(pieceStats).forEach(rotStats => {
+              Object.values(rotStats).forEach(stat => {
+                  if (stat.count) stat.count = Math.floor(stat.count * 0.5);
+                  if (stat.weighted_sum_of_scores) stat.weighted_sum_of_scores *= 0.5;
+              });
+          });
+      });
+      setHintAdjacencyStats({...currentStats});
   };
 
   const loadBackupData = (data) => {
       if(data && data.solverState && data.hintAdjacencyStats) {
-          setStats(data.solverState.stats || { totalRuns: 0, bestScore: 0, avgScore: 0, completedSolutions: 0 });
-          setCurrentRun(data.solverState.currentRun || { run: 0, score: 0 });
+          const loadedStats = data.solverState.stats || {};
+          const newStats = {
+              totalRuns: parseInt(loadedStats.totalRuns) || 0,
+              bestScore: parseInt(loadedStats.bestScore) || 0,
+              avgScore: parseFloat(loadedStats.avgScore) || 0,
+              completedSolutions: parseInt(loadedStats.completedSolutions) || 0
+          };
+          setStats(newStats);
           setHintAdjacencyStats(data.hintAdjacencyStats || {});
           setGlobalScoreDistribution(data.globalScoreDistribution || {});
           setPlacementAttemptCounts(data.placementAttemptCounts || {});
+          setFailCounts(data.failCounts || {});
           setMlParams(data.solverState.mlParams || { 
             useCalibration: true, 
-            boardUpdateFrequency: 100,
-            iterationsPerSecond: 10000
+            boardUpdateFrequency: 2000,
+            iterationsPerSecond: 10000,
+            turboMode: false
           });
+          // Sync Refs
+          hintAdjacencyStatsRef.current = data.hintAdjacencyStats || {};
+          globalScoreDistributionRef.current = data.globalScoreDistribution || {};
+          placementAttemptCountsRef.current = data.placementAttemptCounts || {};
+          failCountsRef.current = data.failCounts || {};
+          currentRunRef.current = data.solverState.currentRun || { run: 0, score: 0 };
+          statsRef.current = newStats;
+                    
+          setBestBoards([]); // Clear best boards to prevent mismatch with new stats
           setBoard(Array(SIZE * SIZE).fill(null));
       } else {
           console.error("Invalid backup file format");
@@ -556,41 +1020,61 @@ export const SolverProvider = ({ children }) => {
 
   const getSelectionPercentages = useCallback((hintPos, direction) => {
     const key = `${hintPos}-${direction}`;
-    const isMlActive = !mlParams.useCalibration;
-    if (!hintAdjacencyStats[key] || !isMlActive) {
+    if (!hintAdjacencyStats[key]) {
       return {};
     }
 
     const pieceStats = hintAdjacencyStats[key];
-    const weights = {};
-    let totalWeight = 0;
+    const isMlActive = !mlParams.useCalibration;
+    const values = {};
+    let totalValue = 0;
+    let minValue = Infinity;
 
+    // First pass: get raw values and find min
     for (const pieceId in pieceStats) {
+      values[pieceId] = {};
       for (const rotation in pieceStats[pieceId]) {
-        const weight = pieceStats[pieceId][rotation].weighted_avg_contribution || 1.0;
-        
-        if (!weights[pieceId]) weights[pieceId] = {};
-        weights[pieceId][rotation] = weight;
-        totalWeight += weight;
+        const stat = pieceStats[pieceId][rotation];
+        const value = isMlActive
+          ? stat.weighted_avg_contribution || 0
+          : stat.count || 0;
+
+        if (value < minValue) {
+          minValue = value;
+        }
+        values[pieceId][rotation] = value;
       }
     }
 
+    // Second pass: normalize and sum
+    const offset = isMlActive ? (minValue < 0 ? Math.abs(minValue) + 1.0 : 1.0) : 0;
+    for (const pieceId in values) {
+      for (const rotation in values[pieceId]) {
+        const normalizedValue = values[pieceId][rotation] + offset;
+        values[pieceId][rotation] = normalizedValue;
+        totalValue += normalizedValue;
+      }
+    }
+
+    if (totalValue === 0) return {};
+
+    // Final pass: calculate percentages
     const percentages = {};
-    for (const pieceId in weights) {
+    for (const pieceId in values) {
       percentages[pieceId] = {};
-      for (const rotation in weights[pieceId]) {
-        percentages[pieceId][rotation] = (weights[pieceId][rotation] / totalWeight) * 100;
+      for (const rotation in values[pieceId]) {
+        percentages[pieceId][rotation] = (values[pieceId][rotation] / totalValue) * 100;
       }
     }
 
     return percentages;
-  }, [hintAdjacencyStats, mlParams]);
+  }, [hintAdjacencyStats, mlParams.useCalibration]);
 
   const value = {
-    onlineCount, // EXPORTED HERE
-    board, isRunning, currentRun, stats, hintAdjacencyStats, globalScoreDistribution, placementAttemptCounts, pieces, hints, mlParams,
-    handleStart, handlePause, handleReset, loadBackupData, getSelectionPercentages, setMlParams
-  };
+    onlineCount,
+    board, isRunning, currentRun, stats, hintAdjacencyStats, globalScoreDistribution, placementAttemptCounts, pieces, hints, mlParams, solutions, actualIps, bestBoards, failCounts, showBarrierMap, setShowBarrierMap, validationStatus, recentStats,
+    handleStart, handlePause, handleReset, loadBackupData, getSelectionPercentages, setMlParams, setBoard, handleKick
+ };
 
   return (
     <SolverContext.Provider value={value}>

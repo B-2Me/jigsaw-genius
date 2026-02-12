@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Button } from "@/components/ui/button";
-import { Play, Pause, RotateCcw, Download, Upload, Globe, FileUp, AlertTriangle, FileText } from "lucide-react";
+import { Play, Pause, RotateCcw, Download, Upload, Globe, FileUp, AlertTriangle, FileText, Trophy, Eye, Copy, Check, ChevronLeft, ChevronRight, X, Zap, Flame, Footprints, Target, HelpCircle } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,7 @@ import {
 import { useSolver } from './SolverContext';
 import { useAuth } from '@/lib/AuthContext';
 import { base44 } from '@/api/base44Client';
+import PuzzleBoard from './PuzzleBoard';
 
 export default function SolverControls({ 
   isRunning, 
@@ -23,34 +24,38 @@ export default function SolverControls({
   onReset, 
   currentStats 
 }) {
-  const { hintAdjacencyStats, loadBackupData, stats, currentRun, getSelectionPercentages, mlParams, setMlParams, globalScoreDistribution, pieces } = useSolver();
+  const { hintAdjacencyStats, loadBackupData, stats, currentRun, getSelectionPercentages, mlParams, setMlParams, globalScoreDistribution, pieces, solutions, setBoard, actualIps, bestBoards, hints, failCounts, showBarrierMap, setShowBarrierMap, validationStatus, handleKick, recentStats } = useSolver();
   const { user: authUser } = useAuth();
   const fileInputRef = useRef(null);
   const [isOwner, setIsOwner] = useState(false);
   
   // Local UI state
   const [localIterations, setLocalIterations] = useState(mlParams.iterationsPerSecond || 10000); 
-  const [localUpdateFreq, setLocalUpdateFreq] = useState(mlParams.boardUpdateFrequency || 100);
+  const [localUpdateFreq, setLocalUpdateFreq] = useState(mlParams.boardUpdateFrequency || 2000);
 
   // Import Modal State
   const [pendingFile, setPendingFile] = useState(null);
   const [showImportChoice, setShowImportChoice] = useState(false);
+  const [copiedBoard, setCopiedBoard] = useState(false);
+  const [viewIndex, setViewIndex] = useState(0);
+  const [isViewModalOpen, setIsViewModalOpen] = useState(false);
+
+  // Prefer stats from context as it updates more reliably during high-frequency batches
+  const activeStats = stats || currentStats;
+
+  // Ensure recentStats has default structure if context returns undefined (e.g. during hot reload race conditions)
+  const safeRecentStats = recentStats || { avg: 0, min: 0, max: 0, history: [] };
 
   useEffect(() => {
-    const checkAccess = async () => {
-      if (authUser) {
-        try {
-          setIsOwner(true);
-        } catch (err) {
-          console.error("Failed to auth:", err);
-          setIsOwner(false);
-        }
-      } else {
-        setIsOwner(false);
-      }
-    };
-    checkAccess();
+    setIsOwner(!!authUser);
   }, [authUser]);
+
+  // Reset view index when bestBoards changes significantly (e.g. new high score reset)
+  useEffect(() => {
+      if (bestBoards && bestBoards.length > 0) {
+          setViewIndex(bestBoards.length - 1);
+      }
+  }, [bestBoards?.length]);
 
   // Trigger file browser
   const triggerFileUpload = () => {
@@ -94,9 +99,10 @@ export default function SolverControls({
         
         let newMlParams = { 
           useCalibration: true, 
-          boardUpdateFrequency: 10, 
+          boardUpdateFrequency: 2000, 
           iterationsPerSecond: 100 
         };
+        let newFailCounts = {};
         
         let isMetadata = false;
         let isGlobalScoreDist = false;
@@ -176,10 +182,13 @@ export default function SolverControls({
                 if (!mergeMode) newMlParams.useCalibration = value === 'true';
                 break;
               case 'BoardUpdateFrequency':
-                if (!mergeMode) newMlParams.boardUpdateFrequency = parseInt(value) || 10;
+                if (!mergeMode) newMlParams.boardUpdateFrequency = parseInt(value) || 2000;
                 break;
               case 'IterationsPerSecond':
                 if (!mergeMode) newMlParams.iterationsPerSecond = parseInt(value) || 100;
+                break;
+              case 'TurboMode':
+                if (!mergeMode) newMlParams.turboMode = value === 'true';
                 break;
             }
           } else {
@@ -192,7 +201,14 @@ export default function SolverControls({
             if (isNaN(pieceId) || isNaN(rotation)) continue;
 
             if (hintPos && direction) {
-              const key = `${hintPos}-${direction}`;
+              // FIX: Handle both legacy keys (pos-dir) and new full-board keys (pos only)
+              let key;
+              if (direction && direction !== 'General' && direction !== 'undefined') {
+                  key = `${hintPos}-${direction}`;
+              } else {
+                  key = hintPos;
+              }
+
               if (!newHintAdjacencyStats[key]) newHintAdjacencyStats[key] = {};
               if (!newHintAdjacencyStats[key][pieceId]) newHintAdjacencyStats[key][pieceId] = {};
               
@@ -239,7 +255,8 @@ export default function SolverControls({
             stats: newStats,
             currentRun: newCurrentRun,
             mlParams: mergeMode ? mlParams : newMlParams
-          }
+          },
+          failCounts: newFailCounts
         });
 
         if (!mergeMode) {
@@ -290,12 +307,22 @@ export default function SolverControls({
 
     const allPercentages = {};
     Object.keys(hintAdjacencyStats).forEach(key => {
-        const [hintPos, direction] = key.split('-');
-        allPercentages[key] = getSelectionPercentages(hintPos, direction);
+        // Only calculate percentages for hint-adjacent positions (legacy keys)
+        if (key.includes('-')) {
+            const [hintPos, direction] = key.split('-');
+            allPercentages[key] = getSelectionPercentages(hintPos, direction);
+        }
     });
 
     Object.keys(hintAdjacencyStats).forEach(key => {
-        const [hintPos, direction] = key.split('-');
+        let hintPos, direction;
+        if (key.includes('-')) {
+            [hintPos, direction] = key.split('-');
+        } else {
+            hintPos = key;
+            direction = 'General';
+        }
+
         const pieceData = hintAdjacencyStats[key];
         
         Object.keys(pieceData).forEach(pieceId => {
@@ -346,6 +373,7 @@ export default function SolverControls({
     csvRows.push(['UseCalibration', mlParams.useCalibration, ...emptyColumns]);
     csvRows.push(['BoardUpdateFrequency', mlParams.boardUpdateFrequency, ...emptyColumns]);
     csvRows.push(['IterationsPerSecond', mlParams.iterationsPerSecond || 100, ...emptyColumns]);
+    csvRows.push(['TurboMode', mlParams.turboMode, ...emptyColumns]);
 
     csvRows.push(['# GLOBAL SCORE DISTRIBUTION', ...emptyColumns]);
     csvRows.push(['Score', 'Count', ...emptyColumns]);
@@ -418,7 +446,7 @@ export default function SolverControls({
 
   const handleUpdateFreqChange = (e) => {
     const value = parseInt(e.target.value);
-    const clamped = isNaN(value) ? 1 : Math.max(1, Math.min(100, value));
+    const clamped = isNaN(value) ? 1 : Math.max(1, Math.min(20000, value));
     setLocalUpdateFreq(clamped);
     setMlParams(p => ({ ...p, boardUpdateFrequency: clamped }));
   };
@@ -429,13 +457,108 @@ export default function SolverControls({
   };
 
   const setMaxUpdateFreq = () => {
-    setLocalUpdateFreq(100);
-    setMlParams(p => ({ ...p, boardUpdateFrequency: 100 }));
+    setLocalUpdateFreq(20000);
+    setMlParams(p => ({ ...p, boardUpdateFrequency: 20000 }));
+  };
+
+  // Helper to draw sparkline
+  const renderSparkline = (data, min, max) => {
+      if (!data || data.length < 2) return null;
+      const width = 60;
+      const height = 20;
+      const range = max - min || 1;
+      
+      const points = data.map((val, i) => {
+          const x = (i / (data.length - 1)) * width;
+          const y = height - ((val - min) / range) * height;
+          return `${x},${y}`;
+      }).join(' ');
+
+      return (
+          <svg width={width} height={height} className="overflow-visible">
+              <polyline points={points} fill="none" stroke="#60a5fa" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+      );
   };
 
   return (
     <>
       <div className="bg-slate-950/50 rounded-2xl p-6 backdrop-blur-sm border border-slate-800">
+        <div className="mb-6 pb-6 border-b border-slate-800">
+            <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+              <Trophy className="w-5 h-5 text-yellow-400" />
+              Top Scores
+            </h3>
+            
+            {solutions && solutions.length > 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {solutions.map((sol, idx) => (
+                      <div key={idx} className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 flex justify-between items-center">
+                          <div>
+                              <div className="text-xs text-yellow-200 font-mono">Run #{sol.run}</div>
+                              <div className="text-[10px] text-yellow-500/70">{new Date(sol.date).toLocaleString()}</div>
+                          </div>
+                          <Button 
+                              size="sm" 
+                              variant="ghost" 
+                              className="text-yellow-400 hover:text-yellow-100 hover:bg-yellow-500/20 h-8"
+                              onClick={() => setBoard(sol.board)}
+                          >
+                              <Eye className="w-4 h-4 mr-1" /> View
+                          </Button>
+                      </div>
+                  ))}
+              </div>
+            ) : (
+                <div className="bg-slate-900/50 border border-slate-800 rounded-lg p-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+                    <div>
+                        <div className="text-sm font-medium text-slate-200">
+                            Best Incomplete Run
+                        </div>
+                        <div className="text-xs text-slate-400 mt-1">
+                            Score: <span className="text-green-400 font-bold">
+                                {bestBoards && bestBoards.length > 0 
+                                    ? bestBoards[0].filter(p => p).length 
+                                    : 0}
+                            </span> / 256
+                            <span className="ml-2 text-slate-500">
+                                • Variations: {bestBoards?.length || 0}
+                            </span>
+                        </div>
+                    </div>
+                    <div className="flex gap-2">
+                        <Button 
+                            size="sm" 
+                            variant="outline" 
+                            className="h-8 bg-slate-800 border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={() => {
+                                if (bestBoards && bestBoards.length > 0) setIsViewModalOpen(true);
+                            }}
+                            disabled={!bestBoards || bestBoards.length === 0}
+                        >
+                            <Eye className="w-4 h-4 mr-2" /> View
+                        </Button>
+                        <Button 
+                            size="sm" 
+                            variant="outline" 
+                            className="h-8 bg-slate-800 border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                            disabled={!bestBoards || bestBoards.length === 0}
+                            onClick={() => {
+                                if (bestBoards && bestBoards.length > 0) {
+                                    navigator.clipboard.writeText(JSON.stringify(bestBoards[viewIndex]));
+                                setCopiedBoard(true);
+                                setTimeout(() => setCopiedBoard(false), 2000);
+                                }
+                            }}
+                        >
+                            {copiedBoard ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
+                            {copiedBoard ? "Copied" : "Copy JSON"}
+                        </Button>
+                    </div>
+                </div>
+            )}
+        </div>
+
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
           <div>
             <h3 className="text-xl font-bold text-white mb-2">Solver Controls</h3>
@@ -481,6 +604,7 @@ export default function SolverControls({
                 variant="outline"
                 className="flex-1 md:flex-none bg-slate-800 border-sky-500/50 text-sky-300 hover:bg-sky-500/20 hover:text-sky-200 transition-all duration-300 hover:shadow-[0_0_15px_rgba(14,165,233,0.5)]"
                 disabled={stats.totalRuns === 0}
+                title="Export current session statistics to CSV"
               >
                 <Download className="w-4 h-4 mr-2" />
                 CSV Export
@@ -493,6 +617,7 @@ export default function SolverControls({
                   variant="outline"
                   className="flex-1 md:flex-none bg-slate-800 border-purple-500/50 text-purple-300 hover:bg-purple-500/20 hover:text-purple-200 whitespace-nowrap transition-all duration-300 hover:shadow-[0_0_15px_rgba(168,85,247,0.5)]"
                   disabled={stats.totalRuns === 0}
+                  title="Export aggregated global statistics"
                 >
                   <Globe className="w-4 h-4 mr-2" />
                   <span className="hidden sm:inline">Global Stats Export</span>
@@ -503,6 +628,8 @@ export default function SolverControls({
                   onClick={triggerFileUpload}
                   variant="outline"
                   className="flex-1 md:flex-none bg-slate-800 border-sky-500/50 hover:bg-sky-500/20 hover:text-sky-200 text-sky-300 transition-all duration-300 hover:shadow-[0_0_15px_rgba(14,165,233,0.5)]"
+                  disabled={isRunning}
+                  title="Import a previous run or backup"
                 >
                   <Upload className="w-4 h-4 mr-2" />
                   Import Data
@@ -522,12 +649,39 @@ export default function SolverControls({
 
         {/* Configuration Section */}
         <div className="mt-6 pt-6 border-t border-slate-800">
-          <h3 className="text-xl font-bold text-white mb-4">Solver Configuration</h3>
+
+          {/* Placement Strategy Box */}
+          <div className="bg-slate-900/40 rounded-xl p-4 border border-slate-800 mb-6">
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center space-x-3">
+                  <Switch
+                      id="calibration-switch"
+                      checked={mlParams.useCalibration}
+                      onCheckedChange={(checked) => setMlParams(p => ({ ...p, useCalibration: checked }))}
+                      className="data-[state=unchecked]:bg-slate-700 data-[state=checked]:bg-green-600 border-transparent"
+                  />
+                  <Label htmlFor="calibration-switch" className="text-slate-300 cursor-pointer select-none font-medium">
+                      Data Collection Mode
+                  </Label>
+              </div>
+              <div className="text-slate-300 text-sm leading-relaxed">
+                {mlParams.useCalibration 
+                  ? "Data collection mode is active. The solver uses uniform random selection to gather comprehensive statistics. When disabled, the solver will use rarity-weighted ML to prioritize pieces based on their historical performance." 
+                  : "Machine learning mode is active. The solver uses rarity-weighted scoring to select pieces based on their historical performance. Selection probabilities are shown for each optimal piece/rotation."}
+              </div>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
-                  <Label htmlFor="iterations-input" className="text-slate-300">
-                      Iterations per Second
-                  </Label>
+                  <div className="flex items-center gap-2">
+                      <Label htmlFor="iterations-input" className="text-slate-300">
+                          Iterations per Second
+                      </Label>
+                      <div title="Target number of placement attempts per second. Higher values use more CPU.">
+                        <HelpCircle className="w-4 h-4 text-slate-500 hover:text-slate-300 transition-colors cursor-help" />
+                      </div>
+                  </div>
                   <div className="flex gap-2">
                       <Input
                           id="iterations-input"
@@ -550,15 +704,20 @@ export default function SolverControls({
               </div>
 
               <div className="space-y-2">
-                  <Label htmlFor="update-input" className="text-slate-300">
-                      Board Update Frequency
-                  </Label>
+                  <div className="flex items-center gap-2">
+                      <Label htmlFor="update-input" className="text-slate-300">
+                          Board Update Frequency
+                      </Label>
+                      <div title="How often the UI updates with the latest board state (in attempts). Higher values improve performance.">
+                        <HelpCircle className="w-4 h-4 text-slate-500 hover:text-slate-300 transition-colors cursor-help" />
+                      </div>
+                  </div>
                   <div className="flex gap-2">
                       <Input
                           id="update-input"
                           type="number"
                           min="1"
-                          max="100"
+                          max="20000"
                           step="1"
                           value={localUpdateFreq}
                           onChange={handleUpdateFreqChange}
@@ -575,26 +734,73 @@ export default function SolverControls({
               </div>
           </div>
           
-          <div className="mt-4 flex items-center space-x-3">
-              <Switch
-                  id="calibration-switch"
-                  checked={mlParams.useCalibration}
-                  onCheckedChange={(checked) => setMlParams(p => ({ ...p, useCalibration: checked }))}
-              />
-              <Label htmlFor="calibration-switch" className="text-slate-300">
-                  Data Collection Mode (ML Disabled)
-              </Label>
+          <div className="mt-6 flex flex-wrap items-center gap-4">
+              <div className="flex items-center space-x-3 bg-slate-900/40 px-3 py-2 rounded-lg border border-slate-800" title="Disables visual board updates during solving to maximize performance.">
+                  <Switch
+                      id="turbo-switch"
+                      checked={mlParams.turboMode}
+                      onCheckedChange={(checked) => setMlParams(p => ({ ...p, turboMode: checked }))}
+                      className="data-[state=unchecked]:bg-slate-700 data-[state=checked]:bg-yellow-500 border-transparent"
+                  />
+                  <Label htmlFor="turbo-switch" className="text-slate-300 flex items-center gap-2 cursor-pointer select-none">
+                      <Zap className={`w-4 h-4 ${mlParams.turboMode ? 'text-yellow-400' : 'text-slate-500'}`} />
+                      Turbo Mode
+                  </Label>
+              </div>
+
+              <div className="flex items-center gap-3">
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    onClick={() => setShowBarrierMap(!showBarrierMap)} 
+                    title="Visualizes where the solver is getting stuck on the board"
+                    className={`h-9 transition-all duration-200 ${
+                        showBarrierMap 
+                            ? 'bg-orange-950/40 border-orange-500/50 text-orange-200 hover:bg-orange-900/60' 
+                            : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white'
+                    }`}
+                  >
+                      <Flame className={`w-4 h-4 mr-2 ${showBarrierMap ? 'text-orange-500' : 'text-slate-400'}`} />
+                      {showBarrierMap ? 'Hide Barrier Map' : 'Show Barrier Map'}
+                  </Button>
+                  
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    onClick={handleKick} 
+                    className="h-9 bg-slate-800 border-orange-500/30 text-orange-300 hover:bg-orange-500/10 hover:text-orange-200 hover:border-orange-500/50 transition-all duration-200" 
+                    title="Reduces learned weights by 50% to encourage exploration"
+                  >
+                      <Footprints className="w-4 h-4 mr-2" />
+                      Kick Solver
+                  </Button>
+              </div>
           </div>
         </div>
         
-        {currentStats && (
-          <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="text-center bg-slate-800/50 rounded-lg p-3">
+        {activeStats && (
+          <div className="mt-6 grid grid-cols-2 md:grid-cols-5 gap-4">
+            <div className="text-center bg-slate-800/50 rounded-lg p-3 md:col-span-2">
               <div className="text-xs text-slate-400 uppercase tracking-wide">
                 Total Runs
               </div>
               <div className="text-2xl font-bold text-white mt-1">
-                {currentStats.totalRuns?.toLocaleString() || 0}
+                {activeStats.totalRuns?.toLocaleString() || 0}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-1 flex items-center justify-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Updates every 10s
+              </div>
+            </div>
+
+            <div className="text-center bg-slate-800/50 rounded-lg p-3">
+              <div className="text-xs text-slate-400 uppercase tracking-wide">
+                Speed (IPS)
+              </div>
+              <div className={`text-xl lg:text-2xl font-bold mt-1 ${
+                  (actualIps || 0) < (mlParams.iterationsPerSecond * 0.8) && isRunning ? 'text-orange-400' : 'text-white'
+              }`}>
+                {isRunning ? (actualIps || 0).toLocaleString() : 0}
+                <span className="text-[10px] text-slate-500 ml-1 font-normal">/ {mlParams.iterationsPerSecond / 1000}k</span>
               </div>
             </div>
             
@@ -603,7 +809,7 @@ export default function SolverControls({
                 Best Score
               </div>
               <div className="text-2xl font-bold text-green-400 mt-1">
-                {currentStats.bestScore || 0}
+                {activeStats.bestScore || 0}
               </div>
             </div>
             
@@ -612,20 +818,19 @@ export default function SolverControls({
                 Avg Score
               </div>
               <div className="text-2xl font-bold text-blue-400 mt-1">
-                {currentStats.avgScore ? currentStats.avgScore.toFixed(1) : '0.0'}
+                {activeStats.avgScore ? activeStats.avgScore.toFixed(3) : '0.000'}
               </div>
-            </div>
-            
-            <div className="text-center bg-slate-800/50 rounded-lg p-3">
-              <div className="text-xs text-slate-400 uppercase tracking-wide">
-                Solutions
-              </div>
-              <div className="text-2xl font-bold text-purple-400 mt-1">
-                {currentStats.completedSolutions || 0}
+              <div className="flex items-center justify-center gap-2 mt-1 h-6">
+                  <div className="text-[10px] text-slate-500 text-right leading-tight">
+                      <div><span className="text-blue-300">{safeRecentStats.avg?.toFixed(1) || '0.0'}</span> avg</div>
+                      <div className="text-[9px] opacity-70">{safeRecentStats.min || 0}-{safeRecentStats.max || 0}</div>
+                  </div>
+                  {renderSparkline(safeRecentStats.history || [], safeRecentStats.min || 0, safeRecentStats.max || 0)}
               </div>
             </div>
           </div>
         )}
+
       </div>
 
       {/* Import Strategy Choice Modal */}
@@ -682,6 +887,70 @@ export default function SolverControls({
               Cancel Import
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Best Score View Modal */}
+      <Dialog open={isViewModalOpen} onOpenChange={setIsViewModalOpen}>
+        <DialogContent className="bg-slate-950/95 border-slate-800 text-white max-w-[95vw] w-auto max-h-[95vh] overflow-y-auto p-0 backdrop-blur-xl">
+            <div className="sticky top-0 z-10 bg-slate-950/80 backdrop-blur-md border-b border-slate-800 p-4 flex flex-wrap justify-between items-center gap-4">
+                 <div className="flex items-center gap-4">
+                     <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                        <Trophy className="w-5 h-5 text-yellow-400" />
+                        Best Result
+                     </h3>
+                     {bestBoards && bestBoards.length > 1 && (
+                        <div className="flex items-center bg-slate-800 rounded-md border border-slate-700">
+                            <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-white" onClick={() => setViewIndex(i => Math.max(0, i - 1))} disabled={viewIndex === 0}>
+                                <ChevronLeft className="w-4 h-4" />
+                            </Button>
+                            <span className="text-xs font-mono px-2 text-slate-400 min-w-[60px] text-center">
+                                {viewIndex + 1} / {bestBoards.length}
+                            </span>
+                            <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-white" onClick={() => setViewIndex(i => Math.min(bestBoards.length - 1, i + 1))} disabled={viewIndex === bestBoards.length - 1}>
+                                <ChevronRight className="w-4 h-4" />
+                            </Button>
+                        </div>
+                     )}
+                 </div>
+                 <div className="flex gap-2">
+                     <Button 
+                        size="sm" 
+                        variant="outline" 
+                        className="h-8 bg-slate-800 border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700"
+                        onClick={() => {
+                            if (bestBoards && bestBoards.length > 0) {
+                                navigator.clipboard.writeText(JSON.stringify(bestBoards[viewIndex]));
+                                setCopiedBoard(true);
+                                setTimeout(() => setCopiedBoard(false), 2000);
+                            }
+                        }}
+                     >
+                        {copiedBoard ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
+                        {copiedBoard ? "Copied" : "Copy JSON"}
+                     </Button>
+                     <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-white" onClick={() => setIsViewModalOpen(false)}>
+                        <X className="w-5 h-5" />
+                     </Button>
+                 </div>
+            </div>
+            
+            <div className="p-0 md:p-4 overflow-x-auto">
+                 {bestBoards && bestBoards.length > 0 && bestBoards[viewIndex] && (
+                     <div className="min-w-[350px] flex justify-center">
+                        <PuzzleBoard 
+                            board={bestBoards[viewIndex]} 
+                            hints={hints} 
+                            isRunning={false}
+                            currentRun={{ 
+                                run: 'BEST', 
+                                score: bestBoards[viewIndex].filter(p => p).length 
+                            }}
+                            barrierMap={showBarrierMap ? failCounts : null}
+                        />
+                     </div>
+                 )}
+            </div>
         </DialogContent>
       </Dialog>
     </>
